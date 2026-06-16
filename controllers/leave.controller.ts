@@ -185,56 +185,68 @@ export const updateLeave = async (
     const { leaveStatus, fromDate, toDate, leaveSubject, leaveReason } =
       req.body;
 
+    // Get current leave details
+    const [currentLeave] = await pool.query<RowDataPacket[]>(
+      `SELECT userId, fromDate as currentFromDate, toDate as currentToDate, leaveStatus as currentStatus 
+       FROM leaves WHERE id = ?`,
+      [leaveId]
+    );
+
+    if (currentLeave.length === 0) {
+      res.status(404).json({ message: "Leave not found" });
+      return;
+    }
+
+    const userId = currentLeave[0].userId;
+    const newFromDate = fromDate || currentLeave[0].currentFromDate;
+    const newToDate = toDate || currentLeave[0].currentToDate;
+    const newStatus = leaveStatus || currentLeave[0].currentStatus;
+
+    // ✅ CRITICAL: Check if trying to APPROVE leave
+    if (newStatus === "Approved") {
+      // Check if employee has ANY attendance (clock-in) on any date in the leave period
+      const [attendanceCheck] = await pool.query<RowDataPacket[]>(
+        `SELECT id, date, clockIn, clockOut, attendanceStatus 
+         FROM attendance 
+         WHERE userId = ? 
+         AND date BETWEEN ? AND ?
+         AND (
+           clockIn IS NOT NULL 
+           OR clockOut IS NOT NULL 
+          OR attendanceStatus IN ('Present', 'Late', 'Short Leave')
+         )
+         LIMIT 1`,
+        [userId, newFromDate, newToDate]
+      );
+
+      if (attendanceCheck.length > 0) {
+        const attendanceDate = new Date(attendanceCheck[0].date).toLocaleDateString();
+        const clockInTime = attendanceCheck[0].clockIn || 'N/A';
+        const attendanceStatus = attendanceCheck[0].attendanceStatus;
+        
+        res.status(409).json({ 
+          message: `Cannot approve leave. Employee has already marked attendance on ${attendanceDate} (Status: ${attendanceStatus}, Clock In: ${clockInTime}).`,
+          conflictDate: attendanceCheck[0].date,
+          attendanceDetails: {
+            date: attendanceCheck[0].date,
+            clockIn: attendanceCheck[0].clockIn,
+            attendanceStatus: attendanceCheck[0].attendanceStatus
+          }
+        });
+        return;
+      }
+    }
+
+    // Update the leave
     await pool.query(
       `UPDATE leaves
        SET fromDate = ?, toDate = ?, leaveStatus = ?, leaveSubject = ?, leaveReason = ?
        WHERE id = ?`,
-      [fromDate, toDate, leaveStatus, leaveSubject, leaveReason, leaveId],
+      [newFromDate, newToDate, newStatus, leaveSubject, leaveReason, leaveId],
     );
-
-    const [leaveRows] = await pool.query<RowDataPacket[]>(
-      `SELECT userId FROM leaves WHERE id = ?`,
-      [leaveId],
-    );
-
-    if (leaveRows.length > 0) {
-      const { userId } = leaveRows[0];
-
-      const [attendanceRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM attendance 
-   WHERE userId = ? 
-   AND date BETWEEN ? AND ?`,
-        [userId, fromDate, toDate],
-      );
-
-      if (attendanceRows.length > 0) {
-        await pool.query(
-          `UPDATE attendance
-           SET attendanceStatus = ?, 
-               leaveStatus = ?,
-               leaveReason = ?
-           WHERE userId = ? AND date BETWEEN ? AND ? `,
-          [
-            leaveStatus === "Approved" ? "Leave" : "Absent",
-            leaveStatus,
-            leaveReason,
-            userId,
-            fromDate,
-            toDate,
-          ],
-        );
-      } else if (leaveStatus === "Approved") {
-        await pool.query(
-          `INSERT INTO attendance
-           (userId, fromDate, toDate, attendanceStatus, leaveStatus, leaveReason, status)
-           VALUES (?, ?, ? , 'Leave', 'Approved', ?, 'Y')`,
-          [userId, fromDate, toDate, leaveReason],
-        );
-      }
-    }
 
     res.status(200).json({
-      message: "Leave updated and attendance status synced",
+      message: "Leave updated successfully",
     });
   } catch (error) {
     console.error(error);

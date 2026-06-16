@@ -149,19 +149,19 @@ export const addProgress = async (
   }
 
   try {
-    const [existingProgress] = await pool.query<RowDataPacket[]>(
-      `SELECT id FROM progress 
-       WHERE employee_id = ? AND date = ?`,
-      [employee_id, date],
-    );
+    // const [existingProgress] = await pool.query<RowDataPacket[]>(
+    //   `SELECT id FROM progress 
+    //    WHERE employee_id = ? AND date = ?`,
+    //   [employee_id, date],
+    // );
 
-    if (Array.isArray(existingProgress) && existingProgress.length > 0) {
-      res.status(409).json({
-        message:
-          "Progress already exists for this user on the selected date. Only one progress entry per day is allowed.",
-      });
-      return;
-    }
+    // if (Array.isArray(existingProgress) && existingProgress.length > 0) {
+    //   res.status(409).json({
+    //     message:
+    //       "Progress already exists for this user on the selected date. Only one progress entry per day is allowed.",
+    //   });
+    //   return;
+    // }
 
     await pool.query(
       `INSERT INTO progress (employee_id, projectId, date, note, progressStatus)
