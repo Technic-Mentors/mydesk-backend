@@ -89,12 +89,15 @@ export const addPromotion = async (
       return;
     }
 
-    const { id, current_designation, requested_designation, note, date } =
-      req.body;
+    const { id, current_designation, requested_designation, note } = req.body;
     const employee_id = req.user.role === "admin" ? id : req.user.id;
 
+    // Set date to today's date automatically
+    const today = new Date().toISOString().split('T')[0];
+
+    // 👇 FIX: Use 'date' instead of 'joining_date'
     const [userRows]: any = await pool.query(
-      "SELECT name, date  FROM tbl_users WHERE id = ?",
+      "SELECT name, date FROM tbl_users WHERE id = ?",
       [employee_id],
     );
 
@@ -103,13 +106,17 @@ export const addPromotion = async (
       return;
     }
 
-    const joiningDate = new Date(userRows[0].joining_date);
-    const promotionDate = new Date(date);
-    if (promotionDate < joiningDate) {
-      res.status(400).json({
-        message: `Promotion date cannot be before joining date (${userRows[0].joining_date})`,
-      });
-      return;
+    // Check if joining date exists and validate
+    if (userRows[0].date) {
+      const joiningDate = new Date(userRows[0].date);
+      const promotionDate = new Date(today);
+      
+      if (promotionDate < joiningDate) {
+        res.status(400).json({
+          message: `Promotion date cannot be before joining date (${userRows[0].date})`,
+        });
+        return;
+      }
     }
 
     const [existingPromotion]: any = await pool.query(
@@ -126,7 +133,7 @@ export const addPromotion = async (
           date = ?, 
           approval = 'PENDING' 
          WHERE employee_id = ? AND is_deleted = 0`,
-        [current_designation, requested_designation, note, date, employee_id],
+        [current_designation, requested_designation, note, today, employee_id],
       );
       res
         .status(200)
@@ -142,7 +149,7 @@ export const addPromotion = async (
           current_designation,
           requested_designation,
           note,
-          date,
+          today,
         ],
       );
       res.status(201).json({ message: "Promotion request added" });
