@@ -8,9 +8,26 @@ export const runSalaryCycle = async (
   try {
     const { year, month } = req.body;
 
+    // Get calendar session ID
+    const [calendarSession]: any = await pool.query(
+      `SELECT id, session_name FROM calendarsession WHERE year = ? AND month = ? AND calendarStatus = 'Active'`,
+      [year, month]
+    );
+
+    if (calendarSession.length === 0) {
+      res.status(400).json({ 
+        message: `No active calendar session found for ${month} ${year}. Please activate the calendar session first.` 
+      });
+      return;
+    }
+
+    const calendarId = calendarSession[0].id;
+    const sessionName = calendarSession[0].session_name;
+
+    // Check if salary cycle already exists for this calendar session
     const [existing]: any = await pool.query(
-      `SELECT id FROM employee_accounts WHERE refNo LIKE ? LIMIT 1`,
-      [`SALARY-${month}-${year}-%`],
+      `SELECT id FROM salarycycle WHERE calendar_session_id = ?`,
+      [calendarId]
     );
 
     if (existing.length > 0) {
@@ -20,77 +37,80 @@ export const runSalaryCycle = async (
       return;
     }
 
+    // Check if employee accounts already exist for this period
+    const [existingAccounts]: any = await pool.query(
+      `SELECT id FROM employee_accounts WHERE refNo LIKE ? LIMIT 1`,
+      [`SALARY-${month}-${year}-%`],
+    );
+
+    if (existingAccounts.length > 0) {
+      res.status(400).json({
+        message: `Salary cycle has already been run for ${month} ${year}`,
+      });
+      return;
+    }
+
     const monthNames = [
-      "January",
-      "February",
-      "March",
-      "April",
-      "May",
-      "June",
-      "July",
-      "August",
-      "September",
-      "October",
-      "November",
-      "December",
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
     ];
     const monthIndex = monthNames.indexOf(month);
     const salaryDate = new Date(`${year}-${month}-01`);
 
     const [salaries]: any = await pool.query(
       `SELECT 
-  c.id,
-  c.employee_id,
-  c.total_salary,
-  c.attendance_base,
-  c.config_date,
-  c.effective_from,
+        c.id,
+        c.employee_id,
+        c.total_salary,
+        c.attendance_base,
+        c.config_date,
+        c.effective_from,
 
-  DAY(LAST_DAY(c.config_date)) AS total_days,
+        DAY(LAST_DAY(c.config_date)) AS total_days,
 
-  COUNT(
-      CASE 
-          WHEN a.attendanceStatus IN ('present','Late')
-          THEN 1
-      END
-  ) AS present_days,
-
-  ROUND(c.total_salary / DAY(LAST_DAY(c.config_date))) AS per_day_salary,
-
-  ROUND(
-      (c.total_salary / DAY(LAST_DAY(c.config_date))) *
-      COUNT(
+        COUNT(
           CASE 
+            WHEN a.attendanceStatus IN ('present','Late')
+            THEN 1
+          END
+        ) AS present_days,
+
+        ROUND(c.total_salary / DAY(LAST_DAY(c.config_date))) AS per_day_salary,
+
+        ROUND(
+          (c.total_salary / DAY(LAST_DAY(c.config_date))) *
+          COUNT(
+            CASE 
               WHEN a.attendanceStatus IN ('present','Late')
               THEN 1
-          END
-      )
-  ) AS attendance_salary,
+            END
+          )
+        ) AS attendance_salary,
 
-  COALESCE(SUM(CAST(l.deduction AS DECIMAL(10,2))),0) AS total_loan_deduction
+        COALESCE(SUM(CAST(l.deduction AS DECIMAL(10,2))),0) AS total_loan_deduction
 
-FROM configempsalaries c
+      FROM configempsalaries c
 
-LEFT JOIN attendance a
-  ON a.userId = c.employee_id
-  AND MONTH(a.date) = MONTH(c.config_date)
-  AND YEAR(a.date) = YEAR(c.config_date)
-  AND a.status = 'Y'
+      LEFT JOIN attendance a
+        ON a.userId = c.employee_id
+        AND MONTH(a.date) = MONTH(c.config_date)
+        AND YEAR(a.date) = YEAR(c.config_date)
+        AND a.status = 'Y'
 
-LEFT JOIN loan l
-  ON l.employee_id = c.employee_id
-  AND l.remainingAmount > 0
+      LEFT JOIN loan l
+        ON l.employee_id = c.employee_id
+        AND l.remainingAmount > 0
 
-WHERE c.status='ACTIVE'
-AND c.effective_from <= LAST_DAY(?)
+      WHERE c.status='ACTIVE'
+      AND c.effective_from <= LAST_DAY(?)
 
-GROUP BY
-  c.id,
-  c.employee_id,
-  c.total_salary,
-  c.config_date,
-  c.effective_from,
-  c.attendance_base`,
+      GROUP BY
+        c.id,
+        c.employee_id,
+        c.total_salary,
+        c.config_date,
+        c.effective_from,
+        c.attendance_base`,
       [salaryDate],
     );
 
@@ -100,8 +120,6 @@ GROUP BY
     }
 
     for (const sal of salaries) {
-      // Use the net_salary from the query which matches what's shown in ConfigEmpSalary
-
       let salaryAmount = 0;
 
       if (sal.attendance_base === "Y") {
@@ -163,14 +181,14 @@ GROUP BY
 
         await connection.query(
           `INSERT INTO employee_accounts 
-    (employee_id, debit, credit, refNo, invoiceNo, payment_date, payment_method, balance) 
-    VALUES (?, ?, ?, ?, ?, NOW(), ?, ?)`,
+            (employee_id, debit, credit, refNo, invoiceNo, payment_date, payment_method, balance) 
+            VALUES (?, ?, ?, ?, ?, NOW(), ?, ?)`,
           [
             sal.employee_id,
             debit,
             credit,
             refNo,
-            formattedInvoice, // Added this
+            formattedInvoice,
             "Cash",
             currentBalance,
           ],
@@ -185,7 +203,24 @@ GROUP BY
       }
     }
 
-    res.json({ message: "Salary cycle run successfully" });
+    // ✅ Insert into salarycycle with 'Processing' status
+    await pool.query(
+      `INSERT INTO salarycycle 
+        (calendar_session_id, session_name, year, month, status, run_date) 
+        VALUES (?, ?, ?, ?, 'Processing', NOW())`,
+      [calendarId, sessionName, year, month]
+    );
+
+    // ✅ Update calendar session status to 'Processing'
+    await pool.query(
+      `UPDATE calendarsession SET calendarStatus = 'Processing' WHERE id = ?`,
+      [calendarId]
+    );
+
+    res.json({ 
+      message: "Salary cycle run successfully",
+      processedEmployees: salaries.length 
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Error running salary cycle" });

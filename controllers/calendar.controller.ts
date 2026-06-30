@@ -4,9 +4,18 @@ import { ResultSetHeader } from "mysql2";
 
 export const getAllCalendarSessions = async (req: Request, res: Response) => {
   try {
-    const [rows] = await pool.query(
-      "SELECT * FROM calendarsession ORDER BY id ASC",
-    );
+    const [rows] = await pool.query(`
+      SELECT 
+        cs.*,
+        CASE 
+          WHEN sc.id IS NOT NULL THEN 'Processing'  -- Changed from 'Processed'
+          WHEN cs.calendarStatus = 'Active' THEN 'Ready'
+          ELSE 'Not Run'
+        END as salaryCycleStatus
+      FROM calendarsession cs
+      LEFT JOIN salarycycle sc ON sc.calendar_session_id = cs.id
+      ORDER BY cs.id ASC
+    `);
     res.status(200).json(rows);
   } catch (error) {
     console.error(error);
@@ -96,42 +105,52 @@ export const activateCalendarSession = async (
   try {
     const { session_name, year, month } = req.body;
 
-    const currentMonth = new Date().toLocaleString("default", {
-      month: "long",
-    });
+    //  REMOVED: Current month/year restriction
+    // Now any month can be activated
 
-    const currentYear = new Date().getFullYear();
+    //  Validate that the session exists for the given month/year
+    const [sessionExists]: any = await pool.query(
+      `SELECT id FROM calendarsession 
+       WHERE LOWER(session_name) = LOWER(?) 
+       AND year = ? 
+       AND LOWER(month) = LOWER(?)`,
+      [session_name, parseInt(year), month]
+    );
 
-    if (month !== currentMonth || parseInt(year) !== currentYear) {
+    if (sessionExists.length === 0) {
       res.status(400).json({
-        message: `Only current month (${currentMonth} ${currentYear}) can be activated`,
+        message: `Calendar session not found for ${month} ${year}`,
       });
       return;
     }
 
+    //  Deactivate all other sessions for this session_name (except 'Processing')
     await pool.query(
-      "UPDATE calendarsession SET calendarStatus = 'InActive' WHERE LOWER(session_name) = LOWER(?) AND calendarStatus != 'Processed'",
+      `UPDATE calendarsession 
+       SET calendarStatus = 'InActive' 
+       WHERE LOWER(session_name) = LOWER(?) 
+       AND calendarStatus NOT IN ('Processing')`,
       [session_name],
     );
 
-    // Activate the selected month
+    //  Activate the selected month
     await pool.query(
       `UPDATE calendarsession
-   SET calendarStatus = 'Active'
-   WHERE LOWER(TRIM(session_name)) = LOWER(?)
-   AND year = ?
-   AND LOWER(TRIM(month)) = LOWER(?)`,
+       SET calendarStatus = 'Active'
+       WHERE LOWER(TRIM(session_name)) = LOWER(?)
+       AND year = ?
+       AND LOWER(TRIM(month)) = LOWER(?)`,
       [session_name.trim(), parseInt(year), month.trim()],
     );
 
-    // Return all rows for that session so frontend shows correct status
+    //  Return all rows for that session so frontend shows correct status
     const [updatedRows]: any = await pool.query(
       `SELECT * FROM calendarsession WHERE LOWER(session_name) = LOWER(?)`,
       [session_name],
     );
 
     res.status(200).json({
-      message: "Session activated successfully",
+      message: `Session activated successfully for ${month} ${year}`,
       data: updatedRows,
     });
   } catch (error) {
