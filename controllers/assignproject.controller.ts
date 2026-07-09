@@ -82,8 +82,9 @@ export const addAssignProject = async (
       return;
     }
 
+    // Check if employee exists
     const [userRows]: any = await pool.query(
-      "SELECT date FROM tbl_users WHERE id = ?",
+      "SELECT id FROM tbl_users WHERE id = ?",
       [employee_id],
     );
 
@@ -92,22 +93,9 @@ export const addAssignProject = async (
       return;
     }
 
-    const dateString = date ? date : new Date().toISOString().split("T")[0];
-    const joiningDate = new Date(userRows[0].date);
-    const assignDateObj = new Date(dateString);
-
-    joiningDate.setHours(0, 0, 0, 0);
-    assignDateObj.setHours(0, 0, 0, 0);
-
-    if (assignDateObj < joiningDate) {
-      res.status(400).json({
-        message: `Project assign date cannot be earlier than employee joining date (${userRows[0].date})`,
-      });
-      return;
-    }
-
+    // Check if project exists and is active
     const [projectRows]: any = await pool.query(
-      "SELECT startDate, endDate FROM projects WHERE id = ? AND projectStatus = 'Y'",
+      "SELECT id FROM projects WHERE id = ? AND projectStatus = 'Y'",
       [projectId],
     );
 
@@ -116,13 +104,21 @@ export const addAssignProject = async (
       return;
     }
 
-    const projectStart = new Date(projectRows[0].startDate);
-    const projectEnd = new Date(projectRows[0].endDate);
+    // Check if employee is already assigned to this project
+    const [existingAssignment]: any = await pool.query(
+      "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y'",
+      [employee_id, projectId],
+    );
 
-    projectStart.setHours(0, 0, 0, 0);
-    projectEnd.setHours(0, 0, 0, 0);
+    if (existingAssignment.length > 0) {
+      res.status(400).json({ 
+        message: "Employee is already assigned to this project" 
+      });
+      return;
+    }
 
-    
+    const dateString = date ? date : new Date().toISOString().split("T")[0];
+
     const query = `
       INSERT INTO assignedprojects (employee_id, projectId, date, assignStatus)
       VALUES (?, ?, ?, 'Y')
@@ -134,12 +130,13 @@ export const addAssignProject = async (
       dateString,
     ]);
 
-    res.json({
+    res.status(201).json({
       id: result.insertId,
       employee_id,
       projectId,
       date: dateString,
       assignStatus: "Y",
+      message: "Project assigned successfully"
     });
   } catch (error) {
     console.error(error);
@@ -164,8 +161,9 @@ export const editAssignProject = async (
       return;
     }
 
+    // Check if employee exists
     const [userRows]: any = await pool.query(
-      "SELECT date FROM tbl_users WHERE id = ?",
+      "SELECT id FROM tbl_users WHERE id = ?",
       [employee_id],
     );
 
@@ -174,22 +172,9 @@ export const editAssignProject = async (
       return;
     }
 
-    const dateString = date ? date : new Date().toISOString().split("T")[0];
-    const joiningDate = new Date(userRows[0].date);
-    const assignDateObj = new Date(dateString);
-
-    joiningDate.setHours(0, 0, 0, 0);
-    assignDateObj.setHours(0, 0, 0, 0);
-
-    if (assignDateObj < joiningDate) {
-      res.status(400).json({
-        message: `Cannot update: Assignment date is before employee joining date (${userRows[0].date})`,
-      });
-      return;
-    }
-
+    // Check if project exists and is active
     const [projectRows]: any = await pool.query(
-      "SELECT startDate, endDate FROM projects WHERE id = ? AND projectStatus = 'Y'",
+      "SELECT id FROM projects WHERE id = ? AND projectStatus = 'Y'",
       [projectId],
     );
 
@@ -198,13 +183,31 @@ export const editAssignProject = async (
       return;
     }
 
-    const projectStart = new Date(projectRows[0].startDate);
-    const projectEnd = new Date(projectRows[0].endDate);
+    // Check if assignment exists
+    const [assignmentExists]: any = await pool.query(
+      "SELECT id FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
+      [id],
+    );
 
-    projectStart.setHours(0, 0, 0, 0);
-    projectEnd.setHours(0, 0, 0, 0);
+    if (assignmentExists.length === 0) {
+      res.status(404).json({ message: "Assignment not found" });
+      return;
+    }
 
-   
+    // Check if employee is already assigned to this project (excluding current assignment)
+    const [existingAssignment]: any = await pool.query(
+      "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y' AND id != ?",
+      [employee_id, projectId, id],
+    );
+
+    if (existingAssignment.length > 0) {
+      res.status(400).json({ 
+        message: "Employee is already assigned to this project" 
+      });
+      return;
+    }
+
+    const dateString = date ? date : new Date().toISOString().split("T")[0];
 
     const query = `
       UPDATE assignedprojects
@@ -219,7 +222,9 @@ export const editAssignProject = async (
       id,
     ]);
 
-    res.json({ message: "Assigned project updated successfully" });
+    res.json({ 
+      message: "Assigned project updated successfully" 
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -230,6 +235,17 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
+    // Check if assignment exists
+    const [assignmentExists]: any = await pool.query(
+      "SELECT id FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
+      [id],
+    );
+
+    if (assignmentExists.length === 0) {
+      res.status(404).json({ message: "Assignment not found" });
+      return;
+    }
+
     const query = `
       UPDATE assignedprojects
       SET assignStatus = 'N'
@@ -237,7 +253,9 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
     `;
 
     await pool.query<ResultSetHeader>(query, [id]);
-    res.json({ message: "Assigned project deleted successfully" });
+    res.json({ 
+      message: "Assigned project deleted successfully" 
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });

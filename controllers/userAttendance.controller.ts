@@ -78,7 +78,10 @@ export const getAllAttendances = async (req: Request, res: Response) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT a.id, a.userId, u.name, u.email, u.role, a.date, a.clockIn, a.clockOut,
               a.attendanceStatus, a.leaveStatus, a.leaveReason,
-              a.workingHours, DAYNAME(a.date) AS day, a.status
+              a.workingHours, DAYNAME(a.date) AS day, a.status,
+              a.latitude, a.longitude, 
+              a.clockInLatitude, a.clockInLongitude,
+              a.clockOutLatitude, a.clockOutLongitude
        FROM attendance a
        JOIN tbl_users u ON a.userId = u.id
        WHERE a.status = 'Y'
