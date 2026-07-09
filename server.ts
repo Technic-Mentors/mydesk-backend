@@ -54,8 +54,8 @@ import emailRoutes from "./routes/email.routes";
 
 import session from "express-session";
 const app: Application = express();
-const PORT: number = 3001;
 
+const PORT: number = parseInt(process.env.PORT || "3002");
 dotenv.config();
 
 app.use(bodyParser.urlencoded({ extended: true }));
