@@ -255,7 +255,58 @@ export const addAttendance = async (
     });
   }
 };
+// In your attendance controller
+export const getAttendanceByUserAndDate = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { userId, date } = req.query;
 
+    if (!userId || !date) {
+      res.status(400).json({ 
+        success: false, 
+        message: "UserId and date are required" 
+      });
+      return;
+    }
+
+    const formattedDate = toMySQLDate(date as string);
+    if (!formattedDate) {
+      res.status(400).json({ 
+        success: false, 
+        message: "Invalid date format" 
+      });
+      return;
+    }
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, userId, date, clockIn, clockOut, attendanceStatus, workingHours 
+       FROM attendance 
+       WHERE userId = ? AND date = ? AND status = 'Y'`,
+      [userId, formattedDate]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ 
+        success: false, 
+        message: "No attendance found for this user on this date" 
+      });
+      return;
+    }
+
+    res.json({ 
+      success: true, 
+      data: rows[0] 
+    });
+  } catch (error) {
+    console.error("Error fetching attendance:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch attendance" 
+    });
+  }
+};
 export const updateAttendance = async (
   req: Request,
   res: Response,

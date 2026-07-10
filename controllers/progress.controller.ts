@@ -214,16 +214,16 @@ export const addProgress = async (
 
     const email = emailRows.length ? emailRows[0].email : "";
 
-    // Check for existing progress on same date
+    // Check for existing progress on same date for the SAME project
     const [existingProgress] = await pool.query<RowDataPacket[]>(
       `SELECT id FROM progress 
-       WHERE employee_id = ? AND date = ? AND progressStatus = 'Y'`,
-      [finalEmployeeId, date],
+       WHERE employee_id = ? AND date = ? AND projectId = ? AND progressStatus = 'Y'`,
+      [finalEmployeeId, date, projectId],
     );
 
     if (Array.isArray(existingProgress) && existingProgress.length > 0) {
       res.status(409).json({
-        message: "Progress already exists for this user on the selected date. Only one progress entry per day is allowed.",
+        message: "Progress already exists for this project on the selected date. Only one progress entry per project per day is allowed.",
       });
       return;
     }
