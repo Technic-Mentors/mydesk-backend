@@ -261,3 +261,46 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+// Unassign a specific project (soft delete - sets assignStatus to 'N')
+export const unassignProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Check if assignment exists and is active
+    const [assignmentExists]: any = await pool.query(
+      "SELECT id, employee_id, projectId FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
+      [id],
+    );
+
+    if (assignmentExists.length === 0) {
+      res.status(404).json({ 
+        message: "Assignment not found or already unassigned" 
+      });
+      return;
+    }
+
+    // Soft delete - update assignStatus to 'N'
+    // updated_at will auto-update if you have ON UPDATE CURRENT_TIMESTAMP
+    const query = `
+      UPDATE assignedprojects
+      SET assignStatus = 'N'
+      WHERE id = ?
+    `;
+
+    await pool.query<ResultSetHeader>(query, [id]);
+
+    res.json({ 
+      success: true,
+      message: "Project unassigned successfully",
+      data: {
+        id: parseInt(id),
+        employee_id: assignmentExists[0].employee_id,
+        projectId: assignmentExists[0].projectId,
+        assignStatus: "N"
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
