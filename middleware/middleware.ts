@@ -17,7 +17,9 @@ export const authenticateToken = (
     return;
   }
 
-  const token = authHeader.split(" ")[1];
+const token = authHeader.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : authHeader;
 
   try {
     const decoded = jwt.verify(token, "your_secret_key") as {

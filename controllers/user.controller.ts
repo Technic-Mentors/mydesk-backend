@@ -2,9 +2,54 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import bcrypt from "bcryptjs";
 import cloudinary, { uploadToCloudinary } from "../utils/cloudinary";
-
+import { AuthenticatedRequest } from "../middleware/middleware";
 const formattedDate = new Date().toLocaleDateString("sv-SE");
+export const updateProfileImage = async (
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
 
+    if (!userId) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ message: "Image is required" });
+      return;
+    }
+
+    const file = req.file;
+
+    if (!file.mimetype.startsWith("image/")) {
+      res.status(400).json({ message: "File must be an image" });
+      return;
+    }
+
+    if (file.size > 4 * 1024 * 1024) {
+      res.status(400).json({ message: "Image size must be less than 5MB" });
+      return;
+    }
+
+    const result = await uploadToCloudinary(file.buffer, "oms_users");
+    const imageUrl = result.secure_url;
+
+    await pool.query("UPDATE tbl_users SET image = ? WHERE id = ?", [
+      imageUrl,
+      userId,
+    ]);
+
+    res.status(200).json({
+      message: "Profile image updated successfully",
+      image: imageUrl,
+    });
+  } catch (error) {
+    console.error("Error updating profile image:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
 export const getAllUsers = async (
   req: Request,
   res: Response,
