@@ -255,6 +255,7 @@ export const addAttendance = async (
     });
   }
 };
+
 // In your attendance controller
 export const getAttendanceByUserAndDate = async (
   req: Request,
@@ -307,6 +308,7 @@ export const getAttendanceByUserAndDate = async (
     });
   }
 };
+
 export const updateAttendance = async (
   req: Request,
   res: Response,
@@ -368,12 +370,31 @@ export const deleteAttendance = async (
   const { id } = req.params;
 
   try {
+    // ✅ Get userId and date before deleting
+    const [rows]: any = await pool.query(
+      "SELECT userId, date FROM attendance WHERE id = ? AND status = 'Y'",
+      [id]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ message: "Attendance record not found" });
+      return;
+    }
+
+    const { userId, date } = rows[0];
+
+    // ✅ Soft delete - update status to 'N'
     await pool.query<ResultSetHeader>(
       "UPDATE attendance SET status = 'N' WHERE id = ?",
       [id],
     );
 
-    res.json({ message: "Attendance deleted successfully" });
+    // ✅ Return userId so frontend knows which employee to update
+    res.json({ 
+      message: "Attendance deleted successfully",
+      userId: userId,
+      date: date
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Failed to delete attendance." });

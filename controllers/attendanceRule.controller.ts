@@ -11,6 +11,7 @@ interface AttendanceRule {
   month: string;
   year: string;
   status?: string;
+  shortLeaveThreshold?: number;
 }
 
 export const getAllConfigTime = async (
@@ -28,13 +29,41 @@ export const getAllConfigTime = async (
   }
 };
 
+// ✅ NEW: Get active attendance rule
+export const getActiveConfigTime = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
+    );
+    if (!rows || (rows as any[]).length === 0) {
+      res.status(404).json({ message: "No active attendance rule found" });
+      return;
+    }
+    res.json((rows as any[])[0]);
+  } catch (error) {
+    console.error("Fetch Error:", error);
+    res.status(500).json({ message: "Server Error" });
+  }
+};
+
 export const addConfigTime = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
   try {
-    const { startTime, endTime, offDay, lateTime, halfLeave, month, year } =
-      req.body as AttendanceRule;
+    const { 
+      startTime, 
+      endTime, 
+      offDay, 
+      lateTime, 
+      halfLeave, 
+      month, 
+      year,
+      shortLeaveThreshold 
+    } = req.body as AttendanceRule;
 
     if (
       !startTime ||
@@ -54,13 +83,15 @@ export const addConfigTime = async (
       return;
     }
 
+    const threshold = shortLeaveThreshold || 120;
+
     await pool.query("UPDATE attendance_rules SET status = 'Inactive'");
 
     const [result] = await pool.query(
       `INSERT INTO attendance_rules 
-       (startTime, endTime, offDay, lateTime, halfLeave, month, year, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active"],
+       (startTime, endTime, offDay, lateTime, halfLeave, month, year, status, shortLeaveThreshold) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active", threshold],
     );
 
     res.status(201).json({
@@ -72,6 +103,7 @@ export const addConfigTime = async (
     res.status(500).json({ message: "Server Error" });
   }
 };
+
 export const updateConfigTime = async (
   req: Request,
   res: Response,
@@ -87,6 +119,7 @@ export const updateConfigTime = async (
       month,
       year,
       status,
+      shortLeaveThreshold,
     } = req.body as AttendanceRule;
 
     const [existing]: any = await pool.query(
@@ -144,17 +177,20 @@ export const updateConfigTime = async (
       return;
     }
 
+    const threshold = shortLeaveThreshold || 120;
+
     const [result] = await pool.query(
       `UPDATE attendance_rules 
-   SET startTime = ?, 
-       endTime = ?, 
-       offDay = ?, 
-       lateTime = ?, 
-       halfLeave = ?, 
-       month = ?, 
-       year = ?, 
-       status = ?
-   WHERE id = ?`,
+       SET startTime = ?, 
+           endTime = ?, 
+           offDay = ?, 
+           lateTime = ?, 
+           halfLeave = ?, 
+           month = ?, 
+           year = ?, 
+           status = ?,
+           shortLeaveThreshold = ?
+       WHERE id = ?`,
       [
         startTime,
         endTime,
@@ -164,6 +200,7 @@ export const updateConfigTime = async (
         month,
         year,
         status ?? "Active",
+        threshold,
         id,
       ],
     );

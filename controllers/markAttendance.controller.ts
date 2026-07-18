@@ -18,6 +18,7 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c; // Distance in meters
 };
 
+// ✅ For Employee - gets ONLY active attendance (status = 'Y')
 export const getAttendance = async (
   req: Request,
   res: Response,
@@ -26,6 +27,7 @@ export const getAttendance = async (
     const userId = req.params.id;
     const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
 
+    // ✅ Check if user is on leave
     const [leaveRows]: any = await pool.query(
       `SELECT leaveReason FROM leaves 
        WHERE userId = ? AND leaveStatus = 'Approved' 
@@ -41,6 +43,7 @@ export const getAttendance = async (
       return;
     }
 
+    // ✅ Check if today is a holiday
     const [holidayRows]: any = await pool.query(
       `SELECT holiday FROM holidays 
        WHERE ? BETWEEN fromDate AND toDate AND holidayStatus = 'Y' LIMIT 1`,
@@ -55,6 +58,7 @@ export const getAttendance = async (
       return;
     }
 
+    // ✅ Check attendance rules for weekly off
     const [rules]: any = await pool.query(
       "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
     );
@@ -79,15 +83,17 @@ export const getAttendance = async (
       }
     }
 
+    // ✅ CRITICAL FIX: Only get active attendance (status = 'Y')
     const [rows]: any = await pool.query(
       `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
               latitude, longitude, clockInLatitude, clockInLongitude, 
               clockOutLatitude, clockOutLongitude, status 
        FROM attendance 
-       WHERE userId = ? AND date = ?`,
+       WHERE userId = ? AND date = ? AND status = 'Y'`,
       [userId, today],
     );
 
+    // ✅ If no active attendance exists - return "Absent" state
     if (!rows || rows.length === 0) {
       res.status(200).json({
         userId: userId,
@@ -112,6 +118,47 @@ export const getAttendance = async (
   }
 };
 
+// ✅ For Admin - gets ALL attendance including deleted (status = 'N')
+export const getAttendanceForAdmin = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  try {
+    const userId = req.params.id;
+    const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+
+    // ✅ Admin can see all records including deleted (status = 'N')
+    const [rows]: any = await pool.query(
+      `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
+              latitude, longitude, clockInLatitude, clockInLongitude, 
+              clockOutLatitude, clockOutLongitude, status 
+       FROM attendance 
+       WHERE userId = ? AND date = ?`,
+      [userId, today],
+    );
+
+    if (!rows || rows.length === 0) {
+      res.status(200).json({
+        userId: userId,
+        date: today,
+        attendanceStatus: "Absent",
+        message: "No attendance records found.",
+      });
+      return;
+    }
+
+    const record = rows[0];
+    if (record && record.date) {
+      record.date = moment.tz(record.date, "Asia/Karachi").format("YYYY-MM-DD");
+    }
+
+    res.status(200).json(record);
+  } catch (error) {
+    console.error("Get Attendance Error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 export const markAttendance = async (
   req: Request,
   res: Response,
@@ -132,6 +179,7 @@ export const markAttendance = async (
     const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
     const currentTime = moment.tz("Asia/Karachi").format("HH:mm:ss");
 
+    // ✅ VALIDATION 2: Check if user is on leave
     const [leaveRows]: any = await pool.query(
       `SELECT id FROM leaves 
        WHERE userId = ? AND leaveStatus = 'Approved' 
@@ -146,6 +194,7 @@ export const markAttendance = async (
       return;
     }
 
+    // ✅ VALIDATION 3: Check if today is a holiday
     const [holidayRows]: any = await pool.query(
       `SELECT holiday FROM holidays 
        WHERE ? BETWEEN fromDate AND toDate AND holidayStatus = 'Y' LIMIT 1`,
@@ -159,6 +208,7 @@ export const markAttendance = async (
       return;
     }
 
+    // ✅ VALIDATION 4: Get attendance rules
     const [rules]: any = await pool.query(
       "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
     );
@@ -177,7 +227,7 @@ export const markAttendance = async (
       return;
     }
 
-    // ✅ VALIDATION 2: Check if user is within allowed radius of office
+    // ✅ VALIDATION 5: Check if user is within allowed radius of office
     if (officeLatitude && officeLongitude) {
       const distance = calculateDistance(
         latitude, 
@@ -199,11 +249,13 @@ export const markAttendance = async (
       }
     }
 
+    // ✅ CRITICAL FIX: Check if attendance already exists (only active records)
     const [rows]: any = await pool.query(
-      "SELECT * FROM attendance WHERE userId = ? AND date = ?",
+      "SELECT * FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
       [userId, today],
     );
 
+    // ✅ If no active attendance record exists - CLOCK IN
     if (!rows.length) {
       let attendanceStatus = currentTime <= lateTime ? "Present" : "Late";
       
@@ -233,25 +285,39 @@ export const markAttendance = async (
       return;
     }
 
+    // ✅ If attendance exists - CLOCK OUT
     const record = rows[0];
+    
+    // ✅ VALIDATION 6: Check if already clocked out
     if (record.clockOut) {
-      res.status(400).json({ message: "Already clocked out" });
+      res.status(400).json({ 
+        message: "You have already clocked out for today." 
+      });
       return;
     }
 
+    // ✅ VALIDATION 7: Minimum time check - Prevent clocking out immediately
     const clockInMoment = moment(record.clockIn, "HH:mm:ss");
     const clockOutMoment = moment(currentTime, "HH:mm:ss");
-
     const durationMinutes = clockOutMoment.diff(clockInMoment, "minutes");
 
+    // ✅ FIX: If less than 2 minutes, treat as double-click and prevent clock out
+    if (durationMinutes < 2) {
+      res.status(400).json({ 
+        message: "You just clocked in. Please wait at least 2 minutes before clocking out. This prevents accidental double-clicks.",
+        code: "MINIMUM_TIME_NOT_MET"
+      });
+      return;
+    }
+
+    // ✅ Calculate working hours
     const durationMilliseconds = clockOutMoment.diff(clockInMoment);
     const diff = moment.utc(durationMilliseconds).format("HH:mm:ss");
 
+    // ✅ Determine final attendance status
     let finalStatus = record.attendanceStatus;
 
-    if (durationMinutes < 1) {
-      finalStatus = "Absent";
-    } else if (durationMinutes <= 120) {
+    if (durationMinutes <= 120) {
       finalStatus = "Short Leave";
     } else if (currentTime < halfLeave) {
       if (
@@ -262,6 +328,7 @@ export const markAttendance = async (
       }
     }
 
+    // ✅ Update attendance with clock out
     await pool.query(
       `UPDATE attendance 
        SET clockOut = ?, 
