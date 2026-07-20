@@ -61,9 +61,14 @@ export const getMyResignations = async (
 };
 
 export const addResignation = async (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response,
 ): Promise<void> => {
+  if (!req.user) {
+    res.status(401).json({ message: "Unauthorized" });
+    return;
+  }
+
   const { id, designation, note, resignation_date } = req.body;
 
   if (!id || !designation || !note || !resignation_date) {
@@ -71,8 +76,10 @@ export const addResignation = async (
     return;
   }
 
+  const isAdmin = req.user.role === "admin";
+
   const [userRows]: any = await pool.query(
-    "SELECT date FROM tbl_users WHERE id = ?",
+    "SELECT name, date FROM tbl_users WHERE id = ?",
     [id],
   );
 
@@ -81,6 +88,7 @@ export const addResignation = async (
     return;
   }
 
+  const employeeName = userRows[0].name || "Employee";
   const joiningDate = new Date(userRows[0].date);
   const selectedResignationDate = new Date(resignation_date);
 
@@ -104,11 +112,52 @@ export const addResignation = async (
       return;
     }
 
-    await pool.query<ResultSetHeader>(
+    const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO resignation (employee_id, designation, note, resignation_date)
        VALUES (?, ?, ?, ?)`,
       [id, designation, note, resignation_date],
     );
+
+    const resignationId = result.insertId;
+
+    // ✅ CREATE NOTIFICATIONS (never notify the actor themselves)
+    try {
+      if (!isAdmin) {
+        // Employee submitted their own resignation → notify all admins
+        const [adminUsers]: any = await pool.query(
+          "SELECT id FROM tbl_users WHERE role = 'admin'"
+        );
+
+        for (const admin of adminUsers) {
+          if (admin.id !== id) {
+            await pool.query(
+              `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+               VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
+              [
+                admin.id,
+                resignationId,
+                `${employeeName} submitted a resignation request`
+              ]
+            );
+          }
+        }
+      } else {
+        // Admin submitted on behalf of the employee → notify that employee
+        if (Number(id) !== req.user.id) {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
+            [
+              id,
+              resignationId,
+              `A resignation request has been submitted for you`
+            ]
+          );
+        }
+      }
+    } catch (notifError) {
+      console.error("Notification error (non-critical):", notifError);
+    }
 
     res.json({ message: "Resignation added successfully" });
   } catch (error) {
@@ -117,91 +166,15 @@ export const addResignation = async (
   }
 };
 
-// export const updateResignation = async (
-//   req: Request,
-//   res: Response,
-// ): Promise<void> => {
-//   const { id } = req.params;
-//   let { designation, note, resignation_date, approval_status } = req.body;
-
-//   const ALLOWED_STATUSES = ["PENDING", "ACCEPTED", "REJECTED"];
-
-//   if (!ALLOWED_STATUSES.includes(approval_status)) {
-//     approval_status = "PENDING";
-//   }
-
-//   if (!designation || !note || !resignation_date) {
-//     res.status(400).json({ message: "All fields are required" });
-//     return;
-//   }
-
-//   const [userRows]: any = await pool.query(
-//     "SELECT date FROM tbl_users WHERE id = ?",
-//     [id],
-//   );
-
-//   if (userRows.length === 0) {
-//     res.status(404).json({ message: "Employee not found" });
-//     return;
-//   }
-
-//   const joiningDate = new Date(userRows[0].date);
-//   const selectedResignationDate = new Date(resignation_date);
-
-//   if (selectedResignationDate < joiningDate) {
-//     res.status(400).json({
-//       message: `Resignation date cannot be before joining date (${userRows[0].date})`,
-//     });
-//     return;
-//   }
-
-//   const connection = await pool.getConnection();
-
-//   try {
-//     await connection.beginTransaction();
-
-//     await connection.query<ResultSetHeader>(
-//       `UPDATE resignation
-//        SET designation = ?, note = ?, resignation_date = ?, approval_status = ?
-//        WHERE id = ?`,
-//       [designation, note, resignation_date, approval_status, id],
-//     );
-
-//     if (approval_status === "ACCEPTED") {
-//       const [[resignation]]: any = await connection.query(
-//         `SELECT employee_id FROM resignation WHERE id = ?`,
-//         [id],
-//       );
-
-//       if (resignation?.employee_id) {
-//         await connection.query(
-//           `UPDATE tbl_users SET loginStatus = 'N', status = 'Inactive' WHERE id = ?`,
-//           [resignation.employee_id],
-//         );
-//       }
-//     }
-
-//     await connection.commit();
-
-//     res.json({
-//       message:
-//         approval_status === "ACCEPTED"
-//           ? "Resignation accepted and user deactivated"
-//           : "Resignation updated successfully",
-//     });
-//   } catch (error) {
-//     await connection.rollback();
-//     console.error(error);
-//     res.status(500).json({ message: "Failed to update resignation" });
-//   } finally {
-//     connection.release();
-//   }
-// };
-
 export const updateResignation = async (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response,
 ): Promise<void> => {
+  if (!req.user) {
+    res.status(401).json({ message: "Unauthorized" });
+    return;
+  }
+
   const { id } = req.params; // resignation ID
   let { designation, note, resignation_date, approval_status } = req.body;
 
@@ -277,6 +250,25 @@ export const updateResignation = async (
     }
 
     await connection.commit();
+
+    // ✅ Notify employee about approval/rejection decision (admin is the actor here)
+    if (approval_status === "ACCEPTED" || approval_status === "REJECTED") {
+      try {
+        if (employeeId !== req.user.id) {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
+            [
+              employeeId,
+              id,
+              `Your resignation request has been ${approval_status === "ACCEPTED" ? "Approved" : "Rejected"}`
+            ]
+          );
+        }
+      } catch (notifError) {
+        console.error("Notification error (non-critical):", notifError);
+      }
+    }
 
     res.json({
       message:

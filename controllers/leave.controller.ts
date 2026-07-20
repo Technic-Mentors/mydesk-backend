@@ -92,8 +92,8 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
     }
 
     let userId: number;
+    let employeeName: string = "Employee";
 
-    // ✅ Check if user is admin
     const isAdmin = req.user.role?.toLowerCase() === "admin";
 
     if (isAdmin) {
@@ -110,41 +110,16 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
       userId = req.user.id;
     }
 
-    const [existing] = await pool.query(
-      `SELECT id FROM leaves WHERE userId = ? AND leaveStatus != 'Rejected' 
-   AND ((fromDate <= ? AND toDate >= ?) OR (fromDate <= ? AND toDate >= ?))`,
-      [userId, toDate, fromDate, fromDate, toDate],
-    );
-
-    if ((existing as any).length > 0) {
-      return res
-        .status(400)
-        .json({ message: "Leave already applied for this user today" });
-    }
-
-    const [attendanceCheck] = await pool.query<RowDataPacket[]>(
-      `SELECT id FROM attendance
-   WHERE userId = ?
-   AND date BETWEEN ? AND ?
-   AND status = 'Y'`,
-      [userId, fromDate, toDate],
-    );
-
-    if (attendanceCheck.length > 0) {
-      return res.status(400).json({
-        message:
-          "Attendance already marked for one or more selected dates. Cannot apply leave.",
-      });
-    }
-
     const [userRows] = await pool.query<RowDataPacket[]>(
-      "SELECT date FROM tbl_users WHERE id = ?",
+      "SELECT id, name, date FROM tbl_users WHERE id = ?",
       [userId],
     );
 
     if (userRows.length === 0) {
       return res.status(404).json({ message: "User not found" });
     }
+
+    employeeName = userRows[0].name || "Employee";
 
     const joiningDate = new Date(userRows[0].date);
     const leaveFromDate = new Date(fromDate);
@@ -156,13 +131,88 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
       });
     }
 
-    await pool.query(
-      `INSERT INTO leaves (userId, leaveSubject, fromDate, toDate, leaveReason, leaveStatus)
-   VALUES (?, ?, ?, ?, ?, ?)`,
-      [userId, leaveSubject, fromDate, toDate, leaveReason, "Pending"],
+    const [existing] = await pool.query(
+      `SELECT id FROM leaves WHERE userId = ? AND leaveStatus != 'Rejected' 
+       AND ((fromDate <= ? AND toDate >= ?) OR (fromDate <= ? AND toDate >= ?))`,
+      [userId, toDate, fromDate, fromDate, toDate],
     );
 
-    return res.status(201).json({ message: "Leave added successfully" });
+    if ((existing as any).length > 0) {
+      return res
+        .status(400)
+        .json({ message: "Leave already applied for this user today" });
+    }
+
+    const [attendanceCheck] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM attendance
+       WHERE userId = ?
+       AND date BETWEEN ? AND ?
+       AND status = 'Y'`,
+      [userId, fromDate, toDate],
+    );
+
+    if (attendanceCheck.length > 0) {
+      return res.status(400).json({
+        message:
+          "Attendance already marked for one or more selected dates. Cannot apply leave.",
+      });
+    }
+
+    const leaveStatus = isAdmin ? "Approved" : "Pending";
+
+    const [result] = await pool.query(
+      `INSERT INTO leaves (userId, leaveSubject, fromDate, toDate, leaveReason, leaveStatus)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [userId, leaveSubject, fromDate, toDate, leaveReason, leaveStatus],
+    );
+
+    const leaveId = (result as any).insertId;
+
+    try {
+      if (!isAdmin) {
+        // Employee applied → notify all admins (except if they are also the applicant)
+        const [adminUsers] = await pool.query<RowDataPacket[]>(
+          "SELECT id FROM tbl_users WHERE role = 'admin'"
+        );
+
+        for (const admin of adminUsers) {
+          if (admin.id !== userId) {
+            await pool.query(
+              `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+               VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
+              [
+                admin.id,
+                leaveId,
+                `${employeeName} applied for leave: ${leaveSubject}`
+              ]
+            );
+          }
+        }
+      } else {
+        // Admin added leave for someone else → notify that employee only
+        if (userId !== req.user.id) {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
+            [
+              userId,
+              leaveId,
+              `Your leave request (${leaveSubject}) has been Approved by admin`
+            ]
+          );
+        }
+      }
+    } catch (notifError) {
+      console.error("Notification error (non-critical):", notifError);
+    }
+
+    return res.status(201).json({ 
+      message: isAdmin 
+        ? "Leave added and approved successfully" 
+        : "Leave added successfully",
+      status: leaveStatus,
+      leaveId: leaveId
+    });
   } catch (error) {
     console.error("Error adding leave:", error);
     if (!res.headersSent) {
@@ -193,7 +243,7 @@ export const updateLeave = async (
 
     // ✅ Get current leave details first
     const [currentLeave] = await pool.query<RowDataPacket[]>(
-      `SELECT userId, fromDate as currentFromDate, toDate as currentToDate, leaveStatus as currentStatus 
+      `SELECT userId, fromDate as currentFromDate, toDate as currentToDate, leaveStatus as currentStatus, leaveSubject as currentSubject
        FROM leaves WHERE id = ? AND status = 'Y'`,
       [leaveId]
     );
@@ -205,6 +255,7 @@ export const updateLeave = async (
 
     const userId = currentLeave[0].userId;
     const currentStatus = currentLeave[0].currentStatus;
+    const currentSubject = currentLeave[0].currentSubject;
     const newFromDate = fromDate || currentLeave[0].currentFromDate;
     const newToDate = toDate || currentLeave[0].currentToDate;
     const newStatus = leaveStatus || currentLeave[0].currentStatus;
@@ -220,6 +271,27 @@ export const updateLeave = async (
          WHERE id = ?`,
         [newFromDate, newToDate, newStatus, leaveSubject, leaveReason, leaveId],
       );
+
+      // ✅ Notify employee when admin changes leave status (approved/rejected)
+      if (
+        (newStatus === "Approved" || newStatus === "Rejected") &&
+        newStatus !== currentStatus &&
+        userId !== req.user.id
+      ) {
+        try {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
+            [
+              userId,
+              leaveId,
+              `Your leave request (${leaveSubject || currentSubject}) has been ${newStatus} by admin`
+            ]
+          );
+        } catch (notifError) {
+          console.error("Notification error (non-critical):", notifError);
+        }
+      }
 
       res.status(200).json({
         message: `Leave updated successfully (Admin override - ${currentStatus} → ${newStatus})`,

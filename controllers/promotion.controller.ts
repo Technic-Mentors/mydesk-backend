@@ -91,6 +91,7 @@ export const addPromotion = async (
 
     const { id, current_designation, requested_designation, note } = req.body;
     const employee_id = req.user.role === "admin" ? id : req.user.id;
+    const isAdmin = req.user.role === "admin";
 
     // Set date to today's date automatically
     const today = new Date().toISOString().split('T')[0];
@@ -105,6 +106,8 @@ export const addPromotion = async (
       res.status(404).json({ message: "Employee not found" });
       return;
     }
+
+    const employeeName = userRows[0].name || "Employee";
 
     // Check if joining date exists and validate
     if (userRows[0].date) {
@@ -124,7 +127,10 @@ export const addPromotion = async (
       [employee_id],
     );
 
+    let promotionId: number;
+
     if (existingPromotion.length > 0) {
+      promotionId = existingPromotion[0].id;
       await pool.query(
         `UPDATE promotion SET 
           current_designation = ?, 
@@ -135,11 +141,8 @@ export const addPromotion = async (
          WHERE employee_id = ? AND is_deleted = 0`,
         [current_designation, requested_designation, note, today, employee_id],
       );
-      res
-        .status(200)
-        .json({ message: "Promotion request updated successfully" });
     } else {
-      await pool.query(
+      const [result]: any = await pool.query(
         `INSERT INTO promotion 
         (employee_id, employee_name, current_designation, requested_designation, note, date, approval)
         VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
@@ -152,6 +155,51 @@ export const addPromotion = async (
           today,
         ],
       );
+      promotionId = result.insertId;
+    }
+
+    // ✅ CREATE NOTIFICATIONS (never notify the actor themselves)
+    try {
+      if (!isAdmin) {
+        // Employee submitted their own promotion request → notify all admins
+        const [adminUsers]: any = await pool.query(
+          "SELECT id FROM tbl_users WHERE role = 'admin'"
+        );
+
+        for (const admin of adminUsers) {
+          if (admin.id !== employee_id) {
+            await pool.query(
+              `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+               VALUES (?, ?, 'promotion', ?, false, NOW(), NOW())`,
+              [
+                admin.id,
+                promotionId,
+                `${employeeName} requested promotion: ${current_designation} → ${requested_designation}`
+              ]
+            );
+          }
+        }
+      } else {
+        // Admin submitted on behalf of the employee → notify that employee
+        if (employee_id !== req.user.id) {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'promotion', ?, false, NOW(), NOW())`,
+            [
+              employee_id,
+              promotionId,
+              `A promotion request (${current_designation} → ${requested_designation}) has been submitted for you`
+            ]
+          );
+        }
+      }
+    } catch (notifError) {
+      console.error("Notification error (non-critical):", notifError);
+    }
+
+    if (existingPromotion.length > 0) {
+      res.status(200).json({ message: "Promotion request updated successfully" });
+    } else {
       res.status(201).json({ message: "Promotion request added" });
     }
   } catch (error) {
@@ -252,6 +300,26 @@ export const updatePromotion = async (
             ],
           );
         }
+      }
+    }
+
+    // ✅ Notify employee about approval/rejection decision (admin is the actor, so employee gets notified, not admin)
+    if (approval === "ACCEPTED" || approval === "REJECTED") {
+      try {
+        const empId = existing[0].employee_id;
+        if (empId !== req.user.id) {
+          await pool.query(
+            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+             VALUES (?, ?, 'promotion', ?, false, NOW(), NOW())`,
+            [
+              empId,
+              promotionId,
+              `Your promotion request (${requested_designation}) has been ${approval === "ACCEPTED" ? "Approved" : "Rejected"}`
+            ]
+          );
+        }
+      } catch (notifError) {
+        console.error("Notification error (non-critical):", notifError);
       }
     }
 

@@ -51,7 +51,7 @@ import accountReportRoutes from "./routes/accountreport.routes";
 import businessVariableRoutes from "./routes/businessvariable.routes";
 import configOvertimeRoutes from "./routes/configOvertime.routes";
 import emailRoutes from "./routes/email.routes";
-
+import notificationRoutes from "./routes/notificationRoutes"
 import session from "express-session";
 const app: Application = express();
 
@@ -108,6 +108,7 @@ app.use("/api", loanRoutes);
 app.use("/api/admin", customeraccountRoutes);
 app.use("/api/admin", supplieraccountRoutes);
 app.use("/api", promotionRoutes);
+app.use("/api/notification", notificationRoutes);
 app.use("/api", resignationRoutes);
 app.use("/api", rejoinRoutes);
 app.use("/api", userDashboardRoutes);
