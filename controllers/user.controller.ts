@@ -56,7 +56,15 @@ export const getAllUsers = async (
 ): Promise<void> => {
   try {
     const [rows]: any = await pool.query(
-      "SELECT * FROM tbl_users WHERE LOWER(role) = 'user'",
+      `SELECT 
+        u.*,
+        (SELECT el.position 
+         FROM employee_lifeline el 
+         WHERE el.employee_id = u.id 
+         ORDER BY el.date DESC, el.id DESC 
+         LIMIT 1) AS position
+       FROM tbl_users u
+       WHERE LOWER(u.role) = 'user'`,
     );
     res.json({ users: rows });
   } catch (error) {
@@ -66,17 +74,20 @@ export const getAllUsers = async (
 };
 
 export const addUser = async (req: Request, res: Response): Promise<void> => {
+  const connection = await pool.getConnection();
   try {
-    let { name, email, password, contact, cnic, address, date, role } =
+    let { name, email, password, contact, cnic, address, date, role, position } =
       req.body;
 
     // Validation...
-    if (!name || !email || !password || !cnic || !contact || !role) {
+    if (!name || !email || !password || !cnic || !contact || !role || !position) {
+      connection.release();
       res.status(400).json({ message: "Missing required fields" });
       return;
     }
 
     if (!/^\d{11}$/.test(contact)) {
+      connection.release();
       res.status(400).json({ message: "Contact must be exactly 11 digits" });
       return;
     }
@@ -87,11 +98,13 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
       const file = req.file;
 
       if (!file.mimetype.startsWith("image/")) {
+        connection.release();
         res.status(400).json({ message: "File must be an image" });
         return;
       }
 
       if (file.size > 4 * 1024 * 1024) {
+        connection.release();
         res.status(400).json({ message: "Image size must be less than 5MB" });
         return;
       }
@@ -101,6 +114,7 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
         imageUrl = result.secure_url;
       } catch (error) {
         console.error("Cloudinary upload error:", error);
+        connection.release();
         res.status(500).json({ message: "Image upload failed" });
         return;
       }
@@ -131,47 +145,70 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
       if (phones) duplicates.push("Phone");
       if (cnics) duplicates.push("CNIC");
 
+      connection.release();
       res.status(400).json({
         message: `${duplicates.join(" and ")} already exists!`,
       });
       return;
     }
 
-    // Continue with database insertion...
-    const query = `
-      INSERT INTO tbl_users (name, email, password, contact, cnic, address, date, role, image)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    const capitalizedName = name
+      .split(" ")
+      .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(" ");
 
-    const values = [
-      // Capitalize every word in the name
-      name
-        .split(" ")
-        .map(
-          (w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(),
-        )
-        .join(" "),
-      email.toLowerCase(),
-      await bcrypt.hash(password, 10),
-      contact,
-      cnic,
-      address || null,
-      date || formattedDate,
-      role,
-      imageUrl,
-    ];
+    const finalDate = date || formattedDate;
 
-    await pool.query(query, values);
-    res.status(201).json({
-      message: "User added successfully",
-      image: imageUrl,
-    });
+    try {
+      await connection.beginTransaction();
+
+      // ✅ STEP 1: Insert into tbl_users
+      const [userResult]: any = await connection.query(
+        `INSERT INTO tbl_users (name, email, password, contact, cnic, address, date, role, image)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          capitalizedName,
+          email.toLowerCase(),
+          await bcrypt.hash(password, 10),
+          contact,
+          cnic,
+          address || null,
+          finalDate,
+          role,
+          imageUrl,
+        ],
+      );
+
+      const newUserId = userResult.insertId;
+
+      // ✅ STEP 2: Auto-create employee_lifeline entry with the position (only for non-admins)
+      if (role !== "admin") {
+        await connection.query(
+          `INSERT INTO employee_lifeline (employee_id, employee_name, email, contact, position, date)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [newUserId, capitalizedName, email.toLowerCase(), contact, position, finalDate],
+        );
+      }
+
+      await connection.commit();
+
+      res.status(201).json({
+        message: "User added successfully",
+        image: imageUrl,
+        userId: newUserId,
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    }
   } catch (error) {
     console.error("Detailed Error adding user:", error);
     res.status(500).json({
       message: "Internal Server Error",
       error: error instanceof Error ? error.message : "Unknown error",
     });
+  } finally {
+    connection.release();
   }
 };
 

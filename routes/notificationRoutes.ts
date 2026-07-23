@@ -1,4 +1,4 @@
-import express from "express";
+import { Router } from "express";
 import { authenticateToken } from "../middleware/middleware";
 import {
   getNotifications,
@@ -6,7 +6,11 @@ import {
   markAllNotificationsRead,
 } from "../controllers/notificationController";
 
-const router = express.Router();
+const router = Router();
+
+// ============================================
+// NOTIFICATION ROUTES
+// ============================================
 
 router.get("/getNotifications", authenticateToken, getNotifications);
 router.patch("/markRead/:id", authenticateToken, markNotificationRead);

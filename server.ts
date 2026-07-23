@@ -51,8 +51,13 @@ import accountReportRoutes from "./routes/accountreport.routes";
 import businessVariableRoutes from "./routes/businessvariable.routes";
 import configOvertimeRoutes from "./routes/configOvertime.routes";
 import emailRoutes from "./routes/email.routes";
-import notificationRoutes from "./routes/notificationRoutes"
+import notificationRoutes from "./routes/notificationRoutes";
+import leadRRoutes from "./routes/crm/lead.routes"
+import pipelineRoutes from "./routes/crm/pipeline.routes";
 import session from "express-session";
+import leadRoutes from "./routes/crm/lead.routes";
+import followUpRoutes from "./routes/crm/followUp.routes";
+import clientRoutes from "./routes/crm/client.routes";
 const app: Application = express();
 
 const PORT: number = parseInt(process.env.PORT || "3002");
@@ -76,13 +81,17 @@ app.use(
 app.use(express.static(path.join(__dirname, "dist")));
 app.use("/api", loginRoutes);
 app.use("/api/admin", userRoutes);
+app.use("/api", followUpRoutes);
+app.use("/api", leadRoutes);
 app.use("/api/admin", employeelifelineRoutes);
+app.use("/api", clientRoutes);
 app.use("/api/admin", customerRoutes);
 app.use("/api/admin", supplierRoutes);
 app.use("/api/admin", attendanceRuleRoutes);
 app.use("/api/admin", markAttendanceRoutes);
 app.use("/api", userAttendanceRoutes);
 app.use("/api", leaveRoutes);
+app.use("/api", pipelineRoutes);
 app.use("/api/admin", holidaysRoutes);
 app.use("/api/admin", employeewithdrawRoutes);
 app.use("/api/admin", projectcategoryRoutes);
@@ -120,6 +129,7 @@ app.use("/api/admin", accountReportRoutes);
 app.use("/api/admin", businessVariableRoutes);
 app.use("/api/admin", configOvertimeRoutes);
 app.use("/api/admin", emailRoutes);
+app.use("/api", notificationRoutes);
 
 app.get("/", (req: Request, res: Response) => {
   res.send("Backend is up and running 🚀");

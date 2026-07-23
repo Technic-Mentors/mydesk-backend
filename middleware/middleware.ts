@@ -2,7 +2,12 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
 export interface AuthenticatedRequest extends Request {
-  user?: { id: number;  email: string; role: string };
+  user?: {
+    id: number;
+    name: string;
+    email: string;
+    role: string;
+  };
 }
 
 export const authenticateToken = (
@@ -17,17 +22,17 @@ export const authenticateToken = (
     return;
   }
 
-const token = authHeader.startsWith("Bearer ")
+  const token = authHeader.startsWith("Bearer ")
     ? authHeader.split(" ")[1]
     : authHeader;
 
   try {
     const decoded = jwt.verify(token, "your_secret_key") as {
       id: number;
+      name: string;
       email: string;
-      role: "admin" | "user";
+      role: string;
     };
-   
 
     req.user = decoded;
     next();

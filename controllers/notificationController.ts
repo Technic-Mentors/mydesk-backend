@@ -11,7 +11,13 @@ export const getNotifications = async (req: AuthenticatedRequest, res: Response)
     }
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, referenceId, type, message, isRead, createdAt
+      `SELECT 
+        id, 
+        referenceId, 
+        type, 
+        message, 
+        isRead, 
+        DATE_FORMAT(createdAt, '%Y-%m-%dT%H:%i:%s.000Z') as createdAt
        FROM notifications
        WHERE userId = ? AND isRead = false
        ORDER BY createdAt DESC
@@ -33,6 +39,16 @@ export const markNotificationRead = async (req: AuthenticatedRequest, res: Respo
       return;
     }
     const { id } = req.params;
+
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM notifications WHERE id = ? AND userId = ?`,
+      [id, req.user.id]
+    );
+
+    if (existing.length === 0) {
+      res.status(404).json({ message: "Notification not found" });
+      return;
+    }
 
     await pool.query(
       `UPDATE notifications SET isRead = true, updatedAt = NOW()
