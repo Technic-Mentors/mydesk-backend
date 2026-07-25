@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import pool from "../../database/db";
 import { AuthenticatedRequest } from "../../middleware/middleware";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
@@ -146,24 +146,7 @@ export const getLeadById = async (req: AuthenticatedRequest, res: Response): Pro
       return;
     }
 
-    // Get history
-    const [history] = await pool.query<RowDataPacket[]>(
-      `
-      SELECT 
-        h.*,
-        u.name as changed_by_name
-      FROM lead_history h
-      LEFT JOIN tbl_users u ON u.id = h.changed_by
-      WHERE h.lead_id = ?
-      ORDER BY h.created_at DESC
-      `,
-      [id]
-    );
-
-    res.json({
-      ...rows[0],
-      history: history,
-    });
+    res.json(rows[0]);
   } catch (error) {
     console.error("Error fetching lead:", error);
     res.status(500).json({ message: "Failed to fetch lead" });
@@ -199,6 +182,15 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
       follow_up_time,
       comments,
       assigned_to,
+      deal_value,
+      probability,
+      expected_close_date,
+      address,
+      company_size,
+      linkedin,
+      budget,
+      department,
+      manager,
     } = req.body;
 
     if (!company_name || !contact_person || !mobile_number) {
@@ -245,8 +237,10 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
         company_name, contact_person, designation, mobile_number, whatsapp_number,
         email, website, country, city, industry, lead_source, product_interest,
         lead_priority, lead_status, follow_up_date, follow_up_time, comments,
-        file_attachment, assigned_to, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        file_attachment, assigned_to, created_by,
+        deal_value, probability, expected_close_date,
+        address, company_size, linkedin, budget, department, manager
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         company_name,
         contact_person,
@@ -268,6 +262,15 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
         file_attachment,
         assigned_to || null,
         req.user.id,
+        deal_value || null,
+        probability || null,
+        expected_close_date || null,
+        address || null,
+        company_size || null,
+        linkedin || null,
+        budget || null,
+        department || null,
+        manager || null,
       ]
     );
 
@@ -280,7 +283,6 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
       );
     }
 
-    // ✅ HISTORY: Lead Created
     await addHistory(
       leadId,
       'created',
@@ -290,58 +292,6 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
       JSON.stringify({ company_name, contact_person }),
       `Lead created: ${company_name}`
     );
-
-    // ✅ If initial status is not "New", add status change
-    if (lead_status && lead_status !== "New") {
-      await addHistory(
-        leadId,
-        'status_changed',
-        req.user.id,
-        'lead_status',
-        'New',
-        lead_status,
-        `Initial status set to ${lead_status}`
-      );
-    }
-
-    // ✅ If initial priority is not "Warm", add priority change
-    if (lead_priority && lead_priority !== "Warm") {
-      await addHistory(
-        leadId,
-        'priority_changed',
-        req.user.id,
-        'lead_priority',
-        'Warm',
-        lead_priority,
-        `Initial priority set to ${lead_priority}`
-      );
-    }
-
-    // ✅ If comments provided, add comment history
-    if (comments) {
-      await addHistory(
-        leadId,
-        'comment_added',
-        req.user.id,
-        'comments',
-        null,
-        comments,
-        comments
-      );
-    }
-
-    // ✅ If follow-up date provided, add follow-up history
-    if (follow_up_date) {
-      await addHistory(
-        leadId,
-        'followup_updated',
-        req.user.id,
-        'follow_up_date',
-        null,
-        follow_up_date,
-        `Follow-up scheduled for ${follow_up_date}`
-      );
-    }
 
     await logActivity(
       req.user.id,
@@ -364,10 +314,7 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
 };
 
 // ============================================
-// UPDATE LEAD
-// ============================================
-// ============================================
-// UPDATE LEAD - With Partial Update Support
+// UPDATE LEAD (WITH AUTO-CONVERSION TO CUSTOMER)
 // ============================================
 export const updateLead = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -396,9 +343,17 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
       follow_up_time,
       comments,
       assigned_to,
+      deal_value,
+      probability,
+      expected_close_date,
+      address,
+      company_size,
+      linkedin,
+      budget,
+      department,
+      manager,
     } = req.body;
 
-    // Get current lead data
     const [currentLead] = await pool.query<RowDataPacket[]>(
       "SELECT * FROM leads WHERE id = ? AND status = 'Y'",
       [id]
@@ -411,19 +366,16 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
 
     const oldData = currentLead[0];
 
-    // ✅ Build update query dynamically - only update fields that are provided
     const updateFields: string[] = [];
     const updateValues: any[] = [];
 
-    // Helper to add field to update if provided
-    const addField = (field: string, value: any, defaultValue: any = null) => {
+    const addField = (field: string, value: any) => {
       if (value !== undefined && value !== null && value !== "") {
         updateFields.push(`${field} = ?`);
         updateValues.push(value);
       }
     };
 
-    // Add all fields (only if provided)
     addField('company_name', company_name);
     addField('contact_person', contact_person);
     addField('designation', designation);
@@ -442,8 +394,16 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
     addField('follow_up_time', follow_up_time);
     addField('comments', comments);
     addField('assigned_to', assigned_to);
+    addField('deal_value', deal_value);
+    addField('probability', probability);
+    addField('expected_close_date', expected_close_date);
+    addField('address', address);
+    addField('company_size', company_size);
+    addField('linkedin', linkedin);
+    addField('budget', budget);
+    addField('department', department);
+    addField('manager', manager);
 
-    // Handle file upload separately
     let file_attachment = oldData.file_attachment;
     
     if (req.file) {
@@ -488,23 +448,19 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
       updateValues.push(file_attachment);
     }
 
-    // ✅ Only proceed if there are fields to update
     if (updateFields.length === 0) {
       res.json({ message: "No fields to update" });
       return;
     }
 
-    // ✅ Execute update
     updateValues.push(id);
     const query = `UPDATE leads SET ${updateFields.join(', ')} WHERE id = ?`;
-    
     await pool.query(query, updateValues);
 
-    // ✅ Track changes for history (only if fields actually changed)
+    // Track changes for history
     const changes = [];
 
-    // Check status change
-    if (lead_status && oldData.lead_status !== lead_status) {
+    if (oldData.lead_status !== lead_status && lead_status) {
       changes.push({
         field: 'lead_status',
         old_value: oldData.lead_status,
@@ -514,8 +470,7 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
       });
     }
 
-    // Check priority change
-    if (lead_priority && oldData.lead_priority !== lead_priority) {
+    if (oldData.lead_priority !== lead_priority && lead_priority) {
       changes.push({
         field: 'lead_priority',
         old_value: oldData.lead_priority,
@@ -525,68 +480,36 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
       });
     }
 
-    // Check follow-up date change
-    if (follow_up_date && oldData.follow_up_date !== follow_up_date) {
+    if (oldData.deal_value !== deal_value && deal_value !== undefined) {
       changes.push({
-        field: 'follow_up_date',
-        old_value: oldData.follow_up_date,
-        new_value: follow_up_date,
-        action_type: 'followup_updated',
-        comment: `Follow-up date changed from ${oldData.follow_up_date || 'N/A'} to ${follow_up_date || 'N/A'}`
+        field: 'deal_value',
+        old_value: oldData.deal_value,
+        new_value: deal_value,
+        action_type: 'lead_updated',
+        comment: `Deal value changed from ${oldData.deal_value || 'N/A'} to ${deal_value}`
       });
     }
 
-    // Check follow-up time change
-    if (follow_up_time && oldData.follow_up_time !== follow_up_time) {
+    if (oldData.probability !== probability && probability !== undefined) {
       changes.push({
-        field: 'follow_up_time',
-        old_value: oldData.follow_up_time,
-        new_value: follow_up_time,
-        action_type: 'followup_updated',
-        comment: `Follow-up time changed from ${oldData.follow_up_time || 'N/A'} to ${follow_up_time || 'N/A'}`
+        field: 'probability',
+        old_value: oldData.probability,
+        new_value: probability,
+        action_type: 'lead_updated',
+        comment: `Probability changed from ${oldData.probability || 'N/A'}% to ${probability}%`
       });
     }
 
-    // Check assigned_to change
-    if (assigned_to && oldData.assigned_to !== parseInt(assigned_to)) {
-      const [oldUser] = await pool.query<RowDataPacket[]>(
-        "SELECT name FROM tbl_users WHERE id = ?",
-        [oldData.assigned_to]
-      );
-      const [newUser] = await pool.query<RowDataPacket[]>(
-        "SELECT name FROM tbl_users WHERE id = ?",
-        [assigned_to]
-      );
+    if (comments && comments !== oldData.comments) {
       changes.push({
-        field: 'assigned_to',
-        old_value: oldData.assigned_to,
-        new_value: assigned_to,
-        action_type: 'assigned_changed',
-        comment: `Assigned from ${oldUser[0]?.name || 'Unassigned'} to ${newUser[0]?.name || 'Unassigned'}`
+        field: 'comments',
+        old_value: oldData.comments,
+        new_value: comments,
+        action_type: 'comment_added',
+        comment: comments
       });
     }
 
-    // Check if new comments added (different from old)
-  // Inside updateLead function - Remove the duplicate comment entry
-
-// ✅ Check if new comments added (different from old)
-if (comments && comments !== oldData.comments) {
-  // ✅ Only add comment history if it's NOT a status change with comment
-  // Check if status also changed - if yes, comment is already included in status_changed
-  const statusChanged = lead_status && oldData.lead_status !== lead_status;
-  
-  if (!statusChanged) {
-    // ✅ Only add as comment_added if status didn't change
-    changes.push({
-      field: 'comments',
-      old_value: oldData.comments,
-      new_value: comments,
-      action_type: 'comment_added',
-      comment: comments
-    });
-  }
-}
-    // ✅ Save all changes to history
     for (const change of changes) {
       await addHistory(
         parseInt(id),
@@ -606,23 +529,100 @@ if (comments && comments !== oldData.comments) {
       parseInt(id),
       oldData,
       req.body,
-      `Lead updated: ${oldData.company_name}`
+      `Lead updated: ${company_name || oldData.company_name}`
     );
 
-    res.json({ message: "Lead updated successfully" });
+    // ✅ ============================================
+    // ✅ AUTO-CONVERT TO CUSTOMER IF STATUS BECOMES "Won"
+    // ✅ ============================================
+    if (lead_status === "Won" && oldData.lead_status !== "Won") {
+      // ✅ Check if already converted
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM customers WHERE lead_id = ? AND customerStatus = 'Y'`,
+        [id]
+      );
+
+      if (existing.length === 0) {
+        // ✅ Get the updated lead data
+        const [updatedLead] = await pool.query<RowDataPacket[]>(
+          "SELECT * FROM leads WHERE id = ? AND status = 'Y'",
+          [id]
+        );
+
+        const leadData = updatedLead[0];
+
+        // ✅ Auto-create customer from lead data
+        const [result] = await pool.query(
+          `INSERT INTO customers (
+            customerName, email, customerContact, companyName, customerAddress,
+            companyAddress, lead_id, assigned_to, project_status, purchased_product,
+            converted_from_lead, conversion_date, customerStatus
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y')`,
+          [
+            leadData.contact_person || '',
+            leadData.email || '',
+            leadData.mobile_number || '',
+            leadData.company_name || '',
+            leadData.address || '',
+            leadData.company_address || '',
+            parseInt(id),
+            leadData.assigned_to || null,
+            'Active',
+            leadData.product_interest || null,
+            1,
+            new Date().toISOString().split('T')[0],
+          ]
+        );
+
+        const customerId = (result as any).insertId;
+
+        // ✅ Add auto-conversion to history
+        await pool.query(
+          `INSERT INTO lead_history 
+           (lead_id, action_type, old_value, new_value, changed_by, comments) 
+           VALUES (?, 'auto_converted', ?, 'Won', ?, ?)`,
+          [
+            id,
+            oldData.lead_status || 'New',
+            req.user.id,
+            `Lead auto-converted to customer upon becoming Won`,
+          ]
+        );
+
+        // ✅ Log activity
+        await logActivity(
+          req.user.id,
+          "AUTO_CONVERT",
+          "CUSTOMER",
+          customerId,
+          null,
+          { lead_id: id, company_name: leadData.company_name },
+          `Lead auto-converted to customer: ${leadData.company_name}`
+        );
+
+        console.log(`✅ Lead ${id} auto-converted to customer ${customerId}`);
+
+        res.json({
+          message: "Lead updated and auto-converted to customer successfully!",
+          auto_converted: true,
+          customer_id: customerId,
+        });
+        return;
+      }
+    }
+
+    res.json({ 
+      message: "Lead updated successfully",
+      auto_converted: false,
+    });
   } catch (error) {
     console.error("Error updating lead:", error);
     res.status(500).json({ message: "Failed to update lead" });
   }
 };
+
 // ============================================
-// UPDATE LEAD STATUS
-// ============================================
-// ============================================
-// UPDATE LEAD STATUS
-// ============================================
-// ============================================
-// UPDATE LEAD STATUS
+// UPDATE LEAD STATUS (WITH AUTO-CONVERSION)
 // ============================================
 export const updateLeadStatus = async (
   req: AuthenticatedRequest,
@@ -637,6 +637,7 @@ export const updateLeadStatus = async (
     const { id } = req.params;
     const { lead_status, comments } = req.body;
 
+    // ✅ Get current lead data
     const [currentLead] = await pool.query<RowDataPacket[]>(
       "SELECT * FROM leads WHERE id = ? AND status = 'Y'",
       [id]
@@ -648,20 +649,92 @@ export const updateLeadStatus = async (
     }
 
     const oldStatus = currentLead[0].lead_status;
-    const existingComments = currentLead[0].comments || "";
+    const leadData = currentLead[0];
 
-    // ✅ Update status
+    // ✅ Update lead status
     await pool.query("UPDATE leads SET lead_status = ? WHERE id = ?", [
       lead_status,
       id,
     ]);
 
-    // ✅ If there's a comment, append to main comments field
-    let commentText = "";
+    // ✅ AUTO-CONVERT TO CUSTOMER IF STATUS BECOMES "Won"
+    if (lead_status === "Won" && oldStatus !== "Won") {
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM customers WHERE lead_id = ? AND customerStatus = 'Y'`,
+        [id]
+      );
+
+      if (existing.length === 0) {
+        const [result] = await pool.query(
+          `INSERT INTO customers (
+            customerName, email, customerContact, companyName, customerAddress,
+            companyAddress, lead_id, assigned_to, project_status, purchased_product,
+            converted_from_lead, conversion_date, customerStatus
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y')`,
+          [
+            leadData.contact_person || '',
+            leadData.email || '',
+            leadData.mobile_number || '',
+            leadData.company_name || '',
+            leadData.address || '',
+            leadData.company_address || '',
+            id,
+            leadData.assigned_to || null,
+            'Active',
+            leadData.product_interest || null,
+            1,
+            new Date().toISOString().split('T')[0],
+          ]
+        );
+
+        const customerId = (result as any).insertId;
+
+        await pool.query(
+          `INSERT INTO lead_history 
+           (lead_id, action_type, old_value, new_value, changed_by, comments) 
+           VALUES (?, 'auto_converted', ?, 'Won', ?, ?)`,
+          [
+            id,
+            oldStatus,
+            req.user.id,
+            `Lead auto-converted to customer upon becoming Won`,
+          ]
+        );
+
+        await logActivity(
+          req.user.id,
+          "AUTO_CONVERT",
+          "CUSTOMER",
+          customerId,
+          null,
+          { lead_id: id, company_name: leadData.company_name },
+          `Lead auto-converted to customer: ${leadData.company_name}`
+        );
+
+        console.log(`✅ Lead ${id} auto-converted to customer ${customerId}`);
+      }
+    }
+
+    // ✅ Add to history
+    await pool.query(
+      `INSERT INTO lead_history 
+       (lead_id, action_type, old_value, new_value, changed_by, comments) 
+       VALUES (?, 'status_changed', ?, ?, ?, ?)`,
+      [
+        id,
+        oldStatus,
+        lead_status,
+        req.user.id,
+        comments || `Status changed from ${oldStatus} to ${lead_status}`,
+      ]
+    );
+
+    // ✅ If there's a comment, add it
     if (comments) {
+      const existingComments = leadData.comments || "";
       const timestamp = new Date().toLocaleString();
       const userName = req.user.name || "User";
-      commentText = `[${timestamp}] ${userName}: ${comments}`;
+      const commentText = `[${timestamp}] ${userName}: ${comments}`;
       
       const newComments = existingComments 
         ? `${existingComments}\n\n${commentText}`
@@ -672,21 +745,6 @@ export const updateLeadStatus = async (
         [newComments, id]
       );
     }
-
-    // ✅ Add ONLY ONE history entry for status change with comment included
-    const historyComment = comments 
-      ? `Status changed from ${oldStatus} to ${lead_status}. Comment: ${comments}`
-      : `Status changed from ${oldStatus} to ${lead_status}`;
-
-    await addHistory(
-      parseInt(id),
-      'status_changed',
-      req.user.id,
-      'lead_status',
-      oldStatus,
-      lead_status,
-      historyComment
-    );
 
     await logActivity(
       req.user.id,
@@ -699,19 +757,93 @@ export const updateLeadStatus = async (
     );
 
     res.json({
-      message: "Lead status updated successfully",
+      message: lead_status === "Won" && oldStatus !== "Won" 
+        ? "Lead status updated and auto-converted to customer successfully!" 
+        : "Lead status updated successfully",
       old_status: oldStatus,
       new_status: lead_status,
+      auto_converted: lead_status === "Won" && oldStatus !== "Won",
     });
   } catch (error) {
     console.error("Error updating lead status:", error);
     res.status(500).json({ message: "Failed to update lead status" });
   }
 };
-// ============================================
-// ADD COMMENT ONLY
-// ============================================
 
+// ============================================
+// ADD COMMENT
+// ============================================
+export const addComment = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const { id } = req.params;
+    const { comment } = req.body;
+
+    if (!comment) {
+      res.status(400).json({ message: "Comment is required" });
+      return;
+    }
+
+    const [currentLead] = await pool.query<RowDataPacket[]>(
+      "SELECT * FROM leads WHERE id = ? AND status = 'Y'",
+      [id]
+    );
+
+    if (currentLead.length === 0) {
+      res.status(404).json({ message: "Lead not found" });
+      return;
+    }
+
+    const existingComments = currentLead[0].comments || "";
+    const timestamp = new Date().toLocaleString();
+    const userName = req.user.name || "User";
+    const commentText = `[${timestamp}] ${userName}: ${comment}`;
+    
+    const newComments = existingComments 
+      ? `${existingComments}\n\n${commentText}`
+      : commentText;
+
+    await pool.query(
+      "UPDATE leads SET comments = ? WHERE id = ?",
+      [newComments, id]
+    );
+
+    await addHistory(
+      parseInt(id),
+      'comment_added',
+      req.user.id,
+      'comments',
+      null,
+      comment,
+      comment
+    );
+
+    await logActivity(
+      req.user.id,
+      "COMMENT_ADDED",
+      "LEAD",
+      parseInt(id),
+      null,
+      { comment },
+      `Comment added to lead: ${comment}`
+    );
+
+    res.json({ 
+      message: "Comment added successfully",
+      comment: comment
+    });
+  } catch (error) {
+    console.error("Error adding comment:", error);
+    res.status(500).json({ message: "Failed to add comment" });
+  }
+};
 
 // ============================================
 // DELETE LEAD
@@ -737,7 +869,6 @@ export const deleteLead = async (req: AuthenticatedRequest, res: Response): Prom
 
     await pool.query("UPDATE leads SET status = 'N' WHERE id = ?", [id]);
 
-    // ✅ Add to history
     await addHistory(
       parseInt(id),
       'deleted',
@@ -796,68 +927,6 @@ export const getLeadHistory = async (
 };
 
 // ============================================
-// GET PIPELINE DATA
-// ============================================
-export const getPipelineData = async (
-  req: AuthenticatedRequest,
-  res: Response
-): Promise<void> => {
-  try {
-    const stages = [
-      "New",
-      "Contacted",
-      "Meeting Scheduled",
-      "Requirement Gathering",
-      "Proposal Sent",
-      "Negotiation",
-      "Won",
-      "Lost",
-      "On Hold",
-    ];
-
-    const pipelineData = [];
-
-    for (const stage of stages) {
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `
-        SELECT 
-          l.id,
-          l.company_name,
-          l.contact_person,
-          l.lead_priority,
-          u.name as assigned_to_name,
-          l.follow_up_date
-        FROM leads l
-        LEFT JOIN tbl_users u ON u.id = l.assigned_to
-        WHERE l.lead_status = ? AND l.status = 'Y'
-        ORDER BY l.lead_priority = 'Hot' DESC, l.created_at DESC
-        LIMIT 10
-        `,
-        [stage]
-      );
-
-      pipelineData.push({
-        stage: stage,
-        count: rows.length,
-        items: rows,
-      });
-    }
-
-    const [totalLeads] = await pool.query<RowDataPacket[]>(
-      "SELECT COUNT(*) as total FROM leads WHERE status = 'Y'"
-    );
-
-    res.json({
-      stages: pipelineData,
-      total: totalLeads[0].total,
-    });
-  } catch (error) {
-    console.error("Error fetching pipeline data:", error);
-    res.status(500).json({ message: "Failed to fetch pipeline data" });
-  }
-};
-
-// ============================================
 // GET LEAD STATS
 // ============================================
 export const getLeadStats = async (
@@ -887,28 +956,37 @@ export const getLeadStats = async (
       `
     );
 
+    const [dealStats] = await pool.query<RowDataPacket[]>(
+      `
+      SELECT 
+        COALESCE(SUM(deal_value), 0) as total_deal_value,
+        COALESCE(AVG(deal_value), 0) as avg_deal_value,
+        COALESCE(SUM(deal_value * probability / 100), 0) as expected_revenue
+      FROM leads 
+      WHERE status = 'Y'
+      `
+    );
+
     res.json({
       total: totalLeads[0].total,
       byStatus: statusCounts,
       byPriority: priorityCounts,
+      dealStats: {
+        totalDealValue: dealStats[0].total_deal_value || 0,
+        avgDealValue: dealStats[0].avg_deal_value || 0,
+        expectedRevenue: dealStats[0].expected_revenue || 0,
+      }
     });
   } catch (error) {
     console.error("Error fetching lead stats:", error);
     res.status(500).json({ message: "Failed to fetch lead stats" });
   }
 };
-// Add this to lead.controller.ts
 
 // ============================================
-// ADD COMMENT ONLY
+// BULK DELETE LEADS
 // ============================================
-// ============================================
-// ADD COMMENT ONLY
-// ============================================
-// ============================================
-// ADD COMMENT ONLY
-// ============================================
-export const addComment = async (
+export const bulkDeleteLeads = async (
   req: AuthenticatedRequest,
   res: Response
 ): Promise<void> => {
@@ -918,66 +996,307 @@ export const addComment = async (
       return;
     }
 
-    const { id } = req.params;
-    const { comment } = req.body;
+    const { ids } = req.body;
 
-    if (!comment) {
-      res.status(400).json({ message: "Comment is required" });
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      res.status(400).json({ message: "No leads selected" });
       return;
     }
 
-    const [currentLead] = await pool.query<RowDataPacket[]>(
-      "SELECT * FROM leads WHERE id = ? AND status = 'Y'",
-      [id]
-    );
-
-    if (currentLead.length === 0) {
-      res.status(404).json({ message: "Lead not found" });
-      return;
-    }
-
-    // ✅ Append comment to existing comments
-    const existingComments = currentLead[0].comments || "";
-    const timestamp = new Date().toLocaleString();
-    const userName = req.user.name || "User";
-    const commentText = `[${timestamp}] ${userName}: ${comment}`;
-    
-    const newComments = existingComments 
-      ? `${existingComments}\n\n${commentText}`
-      : commentText;
-
+    // ✅ Soft delete all selected leads
+    const placeholders = ids.map(() => '?').join(',');
     await pool.query(
-      "UPDATE leads SET comments = ? WHERE id = ?",
-      [newComments, id]
+      `UPDATE leads SET status = 'N' WHERE id IN (${placeholders})`,
+      ids
     );
 
-    // ✅ Add ONLY ONE history entry for comment
-    await addHistory(
-      parseInt(id),
-      'comment_added',
-      req.user.id,
-      'comments',
-      null,
-      comment,
-      comment
-    );
-
+    // ✅ Log activity
     await logActivity(
       req.user.id,
-      "COMMENT_ADDED",
+      "BULK_DELETE",
       "LEAD",
-      parseInt(id),
+      0,
       null,
-      { comment },
-      `Comment added to lead: ${comment}`
+      { count: ids.length },
+      `Bulk deleted ${ids.length} leads`
     );
 
-    res.json({ 
-      message: "Comment added successfully",
-      comment: comment
+    res.json({
+      message: `${ids.length} leads deleted successfully`,
+      count: ids.length,
     });
   } catch (error) {
-    console.error("Error adding comment:", error);
-    res.status(500).json({ message: "Failed to add comment" });
+    console.error("Error bulk deleting leads:", error);
+    res.status(500).json({ message: "Failed to delete leads" });
+  }
+};
+
+// ============================================
+// BULK UPDATE LEAD STATUS
+// ============================================
+export const bulkUpdateStatus = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const { ids, status, comments } = req.body;
+
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      res.status(400).json({ message: "No leads selected" });
+      return;
+    }
+
+    if (!status) {
+      res.status(400).json({ message: "Status is required" });
+      return;
+    }
+
+    // ✅ Update all selected leads
+    const placeholders = ids.map(() => '?').join(',');
+    await pool.query(
+      `UPDATE leads SET lead_status = ? WHERE id IN (${placeholders})`,
+      [status, ...ids]
+    );
+
+    // ✅ Add to history for each lead
+    for (const id of ids) {
+      await pool.query(
+        `INSERT INTO lead_history 
+         (lead_id, action_type, old_value, new_value, changed_by, comments) 
+         VALUES (?, 'bulk_status_change', ?, ?, ?, ?)`,
+        [
+          id,
+          'Previous',
+          status,
+          req.user.id,
+          comments || `Bulk status update to ${status}`,
+        ]
+      );
+    }
+
+    // ✅ Log activity
+    await logActivity(
+      req.user.id,
+      "BULK_STATUS",
+      "LEAD",
+      0,
+      null,
+      { count: ids.length, status },
+      `Bulk updated ${ids.length} leads to status: ${status}`
+    );
+
+    res.json({
+      message: `${ids.length} leads status updated to ${status}`,
+      count: ids.length,
+    });
+  } catch (error) {
+    console.error("Error bulk updating leads:", error);
+    res.status(500).json({ message: "Failed to update leads" });
+  }
+};
+
+// ============================================
+// BULK UPDATE LEAD PRIORITY
+// ============================================
+export const bulkUpdatePriority = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const { ids, priority } = req.body;
+
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      res.status(400).json({ message: "No leads selected" });
+      return;
+    }
+
+    if (!priority) {
+      res.status(400).json({ message: "Priority is required" });
+      return;
+    }
+
+    // ✅ Update all selected leads
+    const placeholders = ids.map(() => '?').join(',');
+    await pool.query(
+      `UPDATE leads SET lead_priority = ? WHERE id IN (${placeholders})`,
+      [priority, ...ids]
+    );
+
+    // ✅ Add to history for each lead
+    for (const id of ids) {
+      await pool.query(
+        `INSERT INTO lead_history 
+         (lead_id, action_type, old_value, new_value, changed_by, comments) 
+         VALUES (?, 'bulk_priority_change', ?, ?, ?, ?)`,
+        [
+          id,
+          'Previous',
+          priority,
+          req.user.id,
+          `Bulk priority update to ${priority}`,
+        ]
+      );
+    }
+
+    // ✅ Log activity
+    await logActivity(
+      req.user.id,
+      "BULK_PRIORITY",
+      "LEAD",
+      0,
+      null,
+      { count: ids.length, priority },
+      `Bulk updated ${ids.length} leads to priority: ${priority}`
+    );
+
+    res.json({
+      message: `${ids.length} leads priority updated to ${priority}`,
+      count: ids.length,
+    });
+  } catch (error) {
+    console.error("Error bulk updating leads:", error);
+    res.status(500).json({ message: "Failed to update leads" });
+  }
+};
+// ============================================
+// EXPORT LEADS TO CSV/EXCEL
+// ============================================
+// ============================================
+// EXPORT LEADS TO CSV
+// ============================================
+export const exportLeads = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const { status, priority, source, search } = req.query;
+
+    let query = `
+      SELECT 
+        id,
+        company_name,
+        contact_person,
+        designation,
+        mobile_number,
+        email,
+        website,
+        country,
+        city,
+        industry,
+        lead_source,
+        product_interest,
+        lead_priority,
+        lead_status,
+        DATE_FORMAT(created_at, '%Y-%m-%d') as created_date,
+        follow_up_date,
+        deal_value,
+        probability,
+        expected_close_date,
+        address,
+        company_size,
+        linkedin,
+        budget,
+        department,
+        manager
+      FROM leads
+      WHERE status = 'Y'
+    `;
+
+    const params: any[] = [];
+
+    if (status) {
+      query += ` AND lead_status = ?`;
+      params.push(status);
+    }
+
+    if (priority) {
+      query += ` AND lead_priority = ?`;
+      params.push(priority);
+    }
+
+    if (source) {
+      query += ` AND lead_source = ?`;
+      params.push(source);
+    }
+
+    if (search) {
+      query += ` AND (company_name LIKE ? OR contact_person LIKE ? OR email LIKE ? OR mobile_number LIKE ?)`;
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+
+    query += ` ORDER BY created_at DESC`;
+
+    const [rows] = await pool.query<RowDataPacket[]>(query, params);
+
+    if (rows.length === 0) {
+      res.status(404).json({ message: "No leads found to export" });
+      return;
+    }
+
+    // ✅ Convert to CSV
+    const headers = [
+      'ID', 'Company', 'Contact Person', 'Designation', 'Mobile',
+      'Email', 'Website', 'Country', 'City', 'Industry',
+      'Source', 'Product Interest', 'Priority', 'Status',
+      'Created Date', 'Follow-up Date', 'Deal Value', 'Probability', 'Expected Close',
+      'Address', 'Company Size', 'LinkedIn', 'Budget', 'Department', 'Manager'
+    ];
+
+    let csv = headers.join(',') + '\n';
+
+    for (const row of rows as any[]) {
+      const rowData = [
+        row.id || '',
+        `"${(row.company_name || '').replace(/"/g, '""')}"`,
+        `"${(row.contact_person || '').replace(/"/g, '""')}"`,
+        `"${(row.designation || '').replace(/"/g, '""')}"`,
+        `"${(row.mobile_number || '').replace(/"/g, '""')}"`,
+        `"${(row.email || '').replace(/"/g, '""')}"`,
+        `"${(row.website || '').replace(/"/g, '""')}"`,
+        `"${(row.country || '').replace(/"/g, '""')}"`,
+        `"${(row.city || '').replace(/"/g, '""')}"`,
+        `"${(row.industry || '').replace(/"/g, '""')}"`,
+        `"${(row.lead_source || '').replace(/"/g, '""')}"`,
+        `"${(row.product_interest || '').replace(/"/g, '""')}"`,
+        `"${(row.lead_priority || '').replace(/"/g, '""')}"`,
+        `"${(row.lead_status || '').replace(/"/g, '""')}"`,
+        row.created_date || '',
+        row.follow_up_date || '',
+        row.deal_value || '',
+        row.probability || '',
+        row.expected_close_date || '',
+        `"${(row.address || '').replace(/"/g, '""')}"`,
+        `"${(row.company_size || '').replace(/"/g, '""')}"`,
+        `"${(row.linkedin || '').replace(/"/g, '""')}"`,
+        row.budget || '',
+        `"${(row.department || '').replace(/"/g, '""')}"`,
+        `"${(row.manager || '').replace(/"/g, '""')}"`,
+      ];
+      csv += rowData.join(',') + '\n';
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=leads_${new Date().toISOString().split('T')[0]}.csv`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(csv);
+  } catch (error) {
+    console.error("Error exporting leads:", error);
+    res.status(500).json({ message: "Failed to export leads" });
   }
 };
