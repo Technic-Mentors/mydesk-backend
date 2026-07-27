@@ -450,7 +450,40 @@ export const getWFHStatistics = async (req: Request, res: Response): Promise<voi
         res.status(500).json({ message: "Internal server error" });
     }
 };
+// ✅ Admin: Delete/Cancel WFH request
+export const deleteWFHRequest = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { id } = req.params;
 
+        // Check if request exists
+        const [request]: any = await pool.query(
+            "SELECT * FROM wfh_requests WHERE id = ?",
+            [id]
+        );
+
+        if (!request.length) {
+            res.status(404).json({ 
+                message: "WFH request not found" 
+            });
+            return;
+        }
+
+        // Delete the request
+        await pool.query(
+            "DELETE FROM wfh_requests WHERE id = ?",
+            [id]
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "WFH request deleted successfully"
+        });
+
+    } catch (error) {
+        console.error("Delete WFH Request Error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+};
 // ✅ Admin: Add WFH request for employee (Auto-Approved)
 export const adminAddWFHRequest = async (req: Request, res: Response): Promise<void> => {
     try {

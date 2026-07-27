@@ -8,7 +8,7 @@ import {
     getWFHRequestById,
     approveWFHRequest,
     rejectWFHRequest,
-    getWFHStatistics, adminAddWFHRequest
+    getWFHStatistics, adminAddWFHRequest,deleteWFHRequest
 } from "../controllers/wfhController";
 
 const router = Router();
@@ -19,7 +19,8 @@ const router = Router();
 
 // Request WFH
 router.post("/:id/request", requestWFH);
-
+// Admin: Delete WFH request
+router.delete("/admin/:id", deleteWFHRequest);
 // Get my WFH requests
 router.get("/:id/my-requests", getMyWFHRequests);
 
