@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import { AuthenticatedRequest } from "../middleware/middleware";
 import { RowDataPacket } from "mysql2";
+import { addCrmActivity } from "./crm/activity.controller";
+
 interface CustomerBody {
   customerName: string;
   customerAddress: string;
@@ -212,6 +214,37 @@ export const addCustomer = async (
       `New customer created: ${companyName || customerName}`
     );
 
+    // ============================================
+    // ✅ AUTO-LOGGING TO CRM ACTIVITIES
+    // ============================================
+
+    await addCrmActivity(
+      'customer',
+      customerId,
+      'Note',
+      `Customer created: ${companyName || customerName}`,
+      `New customer added${lead_id ? ' (converted from lead)' : ''}`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      (req as any).user?.id || 1
+    );
+
+    // If created from lead, also log lead activity
+    if (lead_id) {
+      await addCrmActivity(
+        'lead',
+        lead_id,
+        'Note',
+        `Lead converted to customer: ${companyName || customerName}`,
+        `Lead manually converted to customer`,
+        new Date().toISOString().split('T')[0],
+        new Date().toTimeString().slice(0, 5),
+        (req as any).user?.id || 1
+      );
+    }
+
+    // ✅ END OF AUTO-LOGGING
+
     res.status(201).json({ 
       message: "Customer added successfully",
       id: customerId 
@@ -311,6 +344,23 @@ export const updateCustomer = async (
       req.body,
       `Customer updated: ${companyName || customerName}`
     );
+
+    // ============================================
+    // ✅ AUTO-LOGGING TO CRM ACTIVITIES
+    // ============================================
+
+    await addCrmActivity(
+      'customer',
+      parseInt(customerId),
+      'Note',
+      `Customer updated: ${companyName || customerName}`,
+      `Customer details were updated`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      (req as any).user?.id || 1
+    );
+
+    // ✅ END OF AUTO-LOGGING
 
     res.status(200).json({ message: "Customer updated successfully" });
   } catch (error) {
@@ -458,6 +508,48 @@ export const convertLeadToCustomer = async (
       `Lead converted to customer: ${companyName || leadData.company_name}`
     );
 
+    // ============================================
+    // ✅ AUTO-LOGGING TO CRM ACTIVITIES
+    // ============================================
+
+    // Log customer activity
+    await addCrmActivity(
+      'customer',
+      customerId,
+      'Note',
+      `Lead converted to customer: ${companyName || leadData.company_name}`,
+      `Converted from lead #${leadId}: ${leadData.company_name}`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      req.user.id
+    );
+
+    // Log lead activity
+    await addCrmActivity(
+      'lead',
+      parseInt(leadId),
+      'Note',
+      `Lead converted to customer: ${companyName || leadData.company_name}`,
+      `Lead converted to customer`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      req.user.id
+    );
+
+    // Log status change on lead
+    await addCrmActivity(
+      'lead',
+      parseInt(leadId),
+      'Status Change',
+      `Lead status changed to Won (converted)`,
+      `Lead converted to customer`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      req.user.id
+    );
+
+    // ✅ END OF AUTO-LOGGING
+
     res.status(201).json({
       message: "Lead converted to customer successfully",
       id: customerId,
@@ -578,6 +670,45 @@ export const convertAllWonLeads = async (
       { count: convertedCount },
       `Bulk converted ${convertedCount} Won leads to customers`
     );
+
+    // ============================================
+    // ✅ AUTO-LOGGING TO CRM ACTIVITIES
+    // ============================================
+
+    // Log each conversion to crm_activities
+    for (const lead of wonLeads as any[]) {
+      // Get the newly created customer for this lead
+      const [customer] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM customers WHERE lead_id = ? AND customerStatus = 'Y'`,
+        [lead.id]
+      );
+
+      if (customer.length > 0) {
+        await addCrmActivity(
+          'customer',
+          customer[0].id,
+          'Note',
+          `Lead converted to customer: ${lead.company_name}`,
+          `Bulk converted from lead #${lead.id}`,
+          new Date().toISOString().split('T')[0],
+          new Date().toTimeString().slice(0, 5),
+          req.user.id
+        );
+
+        await addCrmActivity(
+          'lead',
+          lead.id,
+          'Status Change',
+          `Lead status changed to Won (bulk converted)`,
+          `Lead bulk converted to customer`,
+          new Date().toISOString().split('T')[0],
+          new Date().toTimeString().slice(0, 5),
+          req.user.id
+        );
+      }
+    }
+
+    // ✅ END OF AUTO-LOGGING
 
     res.json({
       message: `Successfully converted ${convertedCount} Won leads to customers`,

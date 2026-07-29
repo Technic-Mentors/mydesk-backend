@@ -59,6 +59,7 @@ import leadRoutes from "./routes/crm/lead.routes";
 import followUpRoutes from "./routes/crm/followUp.routes";
 import clientRoutes from "./routes/crm/client.routes";
 import wfhRoutes from "./routes/wfhRoutes";
+import activityRoutes from "./routes/crm/activity.routes";
 const app: Application = express();
 
 const PORT: number = parseInt(process.env.PORT || "3002");
@@ -101,6 +102,7 @@ app.use("/api/admin", projectsRoutes);
 app.use("/api", assignprojectRoutes);
 app.use("/api", todoRoutes);
 app.use("/api", progressRoutes);
+app.use("/", activityRoutes);
 app.use("/api/admin", expensecategoriesRoutes);
 app.use("/api/admin", expensesRoutes);
 app.use("/api/admin", assetcategoryRoutes);

@@ -4,20 +4,15 @@ import { RowDataPacket, ResultSetHeader } from "mysql2";
 
 const toMySQLDate = (dateStr: string | null): string | null => {
   if (!dateStr) return null;
-
-  // If it's already YYYY-MM-DD (with or without time), just take the first 10 chars
   if (/^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
     return dateStr.substring(0, 10);
   }
-
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return null;
-
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, "0");
     const day = String(date.getDate()).padStart(2, "0");
-
     return `${year}-${month}-${day}`;
   } catch (error) {
     return null;
@@ -29,18 +24,13 @@ const calculateWorkingHours = (
   clockOut: string,
 ): string | null => {
   if (!clockIn || !clockOut) return null;
-
   try {
-    // Use a fixed date to compare times safely
     const start = new Date(`1970-01-01T${clockIn}`);
     const end = new Date(`1970-01-01T${clockOut}`);
-
     const diffMs = end.getTime() - start.getTime();
     if (diffMs <= 0) return null;
-
     const hours = Math.floor(diffMs / (1000 * 60 * 60));
     const minutes = Math.floor((diffMs / (1000 * 60)) % 60);
-
     return `${hours.toString().padStart(2, "0")}:${minutes
       .toString()
       .padStart(2, "0")}`;
@@ -61,6 +51,9 @@ const getAttendanceRule = async (): Promise<any | null> => {
   }
 };
 
+// ============================================================
+// GET USERS
+// ============================================================
 export const getUsers = async (req: Request, res: Response): Promise<void> => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -73,6 +66,9 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
   }
 };
 
+// ============================================================
+// GET ALL ATTENDANCES - ✅ WITH REMOTE FIELDS
+// ============================================================
 export const getAllAttendances = async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -81,7 +77,17 @@ export const getAllAttendances = async (req: Request, res: Response) => {
               a.workingHours, DAYNAME(a.date) AS day, a.status,
               a.latitude, a.longitude, 
               a.clockInLatitude, a.clockInLongitude,
-              a.clockOutLatitude, a.clockOutLongitude
+              a.clockOutLatitude, a.clockOutLongitude,
+              -- ✅ Remote fields
+              a.type,
+              a.remoteStatus,
+              a.remoteApprovedBy,
+              a.remoteApprovedAt,
+              a.remoteRejectedReason,
+              a.remoteRequestDate,
+              a.remoteFromDate,
+              a.remoteToDate,
+              a.remoteReason
        FROM attendance a
        JOIN tbl_users u ON a.userId = u.id
        WHERE a.status = 'Y'
@@ -95,6 +101,9 @@ export const getAllAttendances = async (req: Request, res: Response) => {
   }
 };
 
+// ============================================================
+// GET MY ATTENDANCES - ✅ WITH REMOTE FIELDS
+// ============================================================
 export const getMyAttendances = async (
   req: Request,
   res: Response,
@@ -120,7 +129,14 @@ export const getMyAttendances = async (
           a.leaveReason,
           a.workingHours,
           DAYNAME(a.date) AS day,
-          a.status
+          a.status,
+          -- ✅ Remote fields
+          a.type,
+          a.remoteStatus,
+          a.remoteRequestDate,
+          a.remoteFromDate,
+          a.remoteToDate,
+          a.remoteReason
        FROM attendance a
        JOIN tbl_users u ON a.userId = u.id
        WHERE a.userId = ? AND a.status = 'Y'
@@ -135,12 +151,28 @@ export const getMyAttendances = async (
   }
 };
 
+// ============================================================
+// ADD ATTENDANCE - ✅ WITH REMOTE FIELDS
+// ============================================================
 export const addAttendance = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
   const { userId } = req.params;
-  const { date, clockIn, clockOut, attendanceStatus: manualStatus } = req.body;
+  const { 
+    date, 
+    clockIn, 
+    clockOut, 
+    attendanceStatus: manualStatus,
+    // ✅ Remote fields
+    type,
+    remoteStatus,
+    remoteRequestDate,
+    remoteFromDate,
+    remoteToDate,
+    remoteReason,
+    remoteApprovedBy
+  } = req.body;
 
   try {
     const userIdNum = parseInt(userId);
@@ -157,7 +189,6 @@ export const addAttendance = async (
       return;
     }
 
-    // 1. Fetch Rule
     const rule = await getAttendanceRule();
     if (!rule) {
       res.status(400).json({
@@ -167,7 +198,7 @@ export const addAttendance = async (
       return;
     }
 
-    // 2. Weekly Off Check (Using UTC methods to avoid local server shifts)
+    // Weekly Off Check
     if (rule.offDay) {
       const dateObj = new Date(formattedDate);
       const dayName = new Intl.DateTimeFormat("en-US", {
@@ -183,7 +214,7 @@ export const addAttendance = async (
       }
     }
 
-    // 3. Existing Attendance Check
+    // Existing Attendance Check
     const [existing] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
       [userIdNum, formattedDate],
@@ -197,11 +228,9 @@ export const addAttendance = async (
       return;
     }
 
-    // 4. Status Determination
     let finalStatus = manualStatus.toLowerCase();
     let workingHours = null;
 
-    // Calculate working hours for all valid cases
     if (clockIn && clockOut) {
       workingHours = calculateWorkingHours(clockIn, clockOut);
     }
@@ -214,8 +243,6 @@ export const addAttendance = async (
         });
         return;
       }
-
-      // Auto override
       if (rule.halfLeave && clockIn >= rule.halfLeave) {
         finalStatus = "half leave";
       } else if (rule.lateTime && clockIn >= rule.lateTime) {
@@ -223,11 +250,12 @@ export const addAttendance = async (
       }
     }
 
-    // 5. Insert (Explicitly handling potential NULLs for Live Server Strict Mode)
+    // ✅ Insert with remote fields
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO attendance 
-       (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status) 
-       VALUES (?, ?, ?, ?, ?, ?, 'Y')`,
+       (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
+        type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, remoteApprovedBy) 
+       VALUES (?, ?, ?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?)`,
       [
         userIdNum,
         formattedDate,
@@ -235,6 +263,13 @@ export const addAttendance = async (
         clockOut || null,
         finalStatus,
         workingHours,
+        type || 'Onsite',
+        remoteStatus || null,
+        remoteRequestDate || null,
+        remoteFromDate || null,
+        remoteToDate || null,
+        remoteReason || null,
+        remoteApprovedBy || null
       ],
     );
 
@@ -248,15 +283,14 @@ export const addAttendance = async (
     res.status(500).json({
       success: false,
       message: "Internal server error",
-      error:
-        error.code === "ER_DUP_ENTRY"
-          ? "Duplicate entry detected"
-          : error.message,
+      error: error.code === "ER_DUP_ENTRY" ? "Duplicate entry detected" : error.message,
     });
   }
 };
 
-// In your attendance controller
+// ============================================================
+// GET ATTENDANCE BY USER AND DATE - ✅ WITH REMOTE FIELDS
+// ============================================================
 export const getAttendanceByUserAndDate = async (
   req: Request,
   res: Response
@@ -282,7 +316,8 @@ export const getAttendanceByUserAndDate = async (
     }
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, userId, date, clockIn, clockOut, attendanceStatus, workingHours 
+      `SELECT id, userId, date, clockIn, clockOut, attendanceStatus, workingHours,
+              type, remoteStatus, remoteFromDate, remoteToDate, remoteReason
        FROM attendance 
        WHERE userId = ? AND date = ? AND status = 'Y'`,
       [userId, formattedDate]
@@ -309,6 +344,9 @@ export const getAttendanceByUserAndDate = async (
   }
 };
 
+// ============================================================
+// UPDATE ATTENDANCE - ✅ WITH REMOTE FIELDS
+// ============================================================
 export const updateAttendance = async (
   req: Request,
   res: Response,
@@ -321,11 +359,20 @@ export const updateAttendance = async (
     clockIn,
     clockOut,
     attendanceStatus: reqStatus,
+    // ✅ Remote fields
+    type,
+    remoteStatus,
+    remoteApprovedBy,
+    remoteApprovedAt,
+    remoteRejectedReason,
+    remoteRequestDate,
+    remoteFromDate,
+    remoteToDate,
+    remoteReason
   } = req.body;
 
   try {
     const formattedDate = toMySQLDate(date);
-
     const rule = await getAttendanceRule();
 
     let finalStatus = reqStatus?.toLowerCase();
@@ -341,28 +388,56 @@ export const updateAttendance = async (
       }
     }
 
+    // ✅ Update with remote fields
     await pool.query<ResultSetHeader>(
       `UPDATE attendance
-   SET date = ?, clockIn = ?, clockOut = ?,
-       attendanceStatus = ?, workingHours = ?
-   WHERE id = ?`,
+       SET date = ?, 
+           clockIn = ?, 
+           clockOut = ?,
+           attendanceStatus = ?, 
+           workingHours = ?,
+           type = ?,
+           remoteStatus = ?,
+           remoteApprovedBy = ?,
+           remoteApprovedAt = ?,
+           remoteRejectedReason = ?,
+           remoteRequestDate = ?,
+           remoteFromDate = ?,
+           remoteToDate = ?,
+           remoteReason = ?
+       WHERE id = ?`,
       [
         formattedDate,
         clockIn || null,
         clockOut || null,
         finalStatus,
         workingHours,
+        type || 'Onsite',
+        remoteStatus || null,
+        remoteApprovedBy || null,
+        remoteApprovedAt || null,
+        remoteRejectedReason || null,
+        remoteRequestDate || null,
+        remoteFromDate || null,
+        remoteToDate || null,
+        remoteReason || null,
         id,
       ],
     );
 
-    res.json({ message: "Attendance updated successfully" });
+    res.json({ 
+      message: "Attendance updated successfully",
+      success: true 
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Failed to update attendance." });
   }
 };
 
+// ============================================================
+// DELETE ATTENDANCE
+// ============================================================
 export const deleteAttendance = async (
   req: Request,
   res: Response,
@@ -370,7 +445,6 @@ export const deleteAttendance = async (
   const { id } = req.params;
 
   try {
-    // ✅ Get userId and date before deleting
     const [rows]: any = await pool.query(
       "SELECT userId, date FROM attendance WHERE id = ? AND status = 'Y'",
       [id]
@@ -383,13 +457,11 @@ export const deleteAttendance = async (
 
     const { userId, date } = rows[0];
 
-    // ✅ Soft delete - update status to 'N'
     await pool.query<ResultSetHeader>(
       "UPDATE attendance SET status = 'N' WHERE id = ?",
       [id],
     );
 
-    // ✅ Return userId so frontend knows which employee to update
     res.json({ 
       message: "Attendance deleted successfully",
       userId: userId,

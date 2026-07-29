@@ -33,7 +33,6 @@ const determineAttendanceStatus = (
     const clockOutMoment = moment(clockOut, "HH:mm:ss");
     const startMoment = moment(startTime, "HH:mm:ss");
     const endMoment = moment(endTime, "HH:mm:ss");
-    const halfLeaveMoment = moment(halfLeaveTime, "HH:mm:ss");
     
     const totalMinutesWorked = clockOutMoment.diff(clockInMoment, "minutes");
     const expectedShiftMinutes = endMoment.diff(startMoment, "minutes");
@@ -59,7 +58,7 @@ const determineAttendanceStatus = (
 };
 
 // ============================================================
-// UPDATED: Get Attendance (Employee)
+// GET ATTENDANCE (Employee)
 // ============================================================
 export const getAttendance = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -122,10 +121,13 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             }
         }
 
+        // ✅ Get attendance with remote fields
         const [rows]: any = await pool.query(
             `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
                     latitude, longitude, clockInLatitude, clockInLongitude, 
-                    clockOutLatitude, clockOutLongitude, status, isWFH, wfhRequestId
+                    clockOutLatitude, clockOutLongitude, status,
+                    type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
+                    remoteReason, remoteApprovedBy, remoteApprovedAt, remoteRejectedReason
              FROM attendance 
              WHERE userId = ? AND date = ? AND status = 'Y'`,
             [userId, today],
@@ -156,17 +158,22 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
 };
 
 // ============================================================
-// UPDATED: Mark Attendance with WFH Logic
+// MARK ATTENDANCE (Single Table - Remote)
+// ============================================================
+// ============================================================
+// MARK ATTENDANCE - With "Late (Remote)" Support
+// ============================================================
+// ============================================================
+// MARK ATTENDANCE - Fixed Remote Clock In
 // ============================================================
 export const markAttendance = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.params.id;
         const { latitude, longitude } = req.body;
 
-        // Validation 1: Check if location is provided
         if (!latitude || !longitude) {
-            res.status(400).json({ 
-                message: "Location is required. Please enable GPS and allow location access.",
+            res.status(400).json({
+                message: "Location is required",
                 code: "LOCATION_REQUIRED"
             });
             return;
@@ -175,36 +182,30 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
         const currentTime = moment.tz("Asia/Karachi").format("HH:mm:ss");
 
-        // Validation 2: Check if user is on leave
+        // Check leave
         const [leaveRows]: any = await pool.query(
             `SELECT id FROM leaves 
              WHERE userId = ? AND leaveStatus = 'Approved' 
              AND ? BETWEEN fromDate AND toDate LIMIT 1`,
             [userId, today],
         );
-
         if (leaveRows.length > 0) {
-            res.status(400).json({
-                message: "You are on leave today. Attendance cannot be marked.",
-            });
+            res.status(400).json({ message: "You are on leave today" });
             return;
         }
 
-        // Validation 3: Check if today is a holiday
+        // Check holiday
         const [holidayRows]: any = await pool.query(
             `SELECT holiday FROM holidays 
              WHERE ? BETWEEN fromDate AND toDate AND holidayStatus = 'Y' LIMIT 1`,
             [today],
         );
-
         if (holidayRows.length > 0) {
-            res.status(400).json({
-                message: `Today is a Holiday (${holidayRows[0].holiday}). Attendance cannot be marked.`,
-            });
+            res.status(400).json({ message: `Today is Holiday: ${holidayRows[0].holiday}` });
             return;
         }
 
-        // Validation 4: Get attendance rules
+        // Get attendance rules
         const [rules]: any = await pool.query(
             "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
         );
@@ -212,51 +213,43 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             res.status(400).json({ message: "Attendance rules not configured" });
             return;
         }
-        
-        const { 
-            startTime, 
-            endTime, 
-            lateTime, 
-            halfLeave, 
-            offDay, 
-            officeLatitude, 
-            officeLongitude, 
-            allowedRadius = 100,
-            shortLeaveThreshold = 120,
-            allowWFH = true,
-            wfhAllowedRadius = 0
+
+        const {
+            startTime, endTime, lateTime, halfLeave, offDay,
+            officeLatitude, officeLongitude, allowedRadius = 100,
+            shortLeaveThreshold = 120, allowWFH = true
         } = rules[0];
 
         const todayDayName = moment.tz("Asia/Karachi").format("dddd");
-
         if (offDay && todayDayName.toLowerCase() === offDay.toLowerCase()) {
-            res.status(400).json({
-                message: `${offDay} is configured as Off Day. Attendance cannot be marked.`,
-            });
+            res.status(400).json({ message: `${offDay} is Weekly Off` });
             return;
         }
 
         // ============================================================
-        // 🆕 WFH VALIDATION
+        // ✅ CHECK FOR REMOTE APPROVAL
         // ============================================================
-        let isWFH = false;
-        let wfhRequestData = null;
+        let isRemote = false;
+        let remoteRecordId = null;
+        let remoteReason = null;
 
-        // Check if WFH is enabled in rules
         if (allowWFH) {
-            // Check if user has approved WFH for today
-            const [wfhRows]: any = await pool.query(
-                `SELECT * FROM wfh_requests 
+            const [remoteRows]: any = await pool.query(
+                `SELECT id, remoteStatus, remoteFromDate, remoteToDate, remoteReason, remoteRequestDate
+                 FROM attendance 
                  WHERE userId = ? 
-                 AND wfhStatus = 'Approved'
-                 AND ? BETWEEN fromDate AND toDate
+                 AND remoteStatus = 'Approved'
+                 AND remoteFromDate <= ? AND remoteToDate >= ?
+                 AND status = 'Y'
                  LIMIT 1`,
-                [userId, today]
+                [userId, today, today]
             );
 
-            if (wfhRows.length > 0) {
-                wfhRequestData = wfhRows[0];
-                isWFH = true;
+            if (remoteRows.length > 0) {
+                isRemote = true;
+                remoteRecordId = remoteRows[0].id;
+                remoteReason = remoteRows[0].remoteReason;
+                console.log("✅ Found approved remote record ID:", remoteRecordId);
             }
         }
 
@@ -266,38 +259,12 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         let locationValid = false;
         let locationMessage = "";
 
-        if (isWFH) {
-            // WFH - Location is always valid
+        if (isRemote) {
             locationValid = true;
-            
-            if (wfhAllowedRadius === 0) {
-                locationMessage = "WFH approved - No location restriction";
-            } else if (officeLatitude && officeLongitude) {
-                const distance = calculateDistance(
-                    latitude, 
-                    longitude, 
-                    officeLatitude, 
-                    officeLongitude
-                );
-                
-                if (distance <= wfhAllowedRadius) {
-                    locationMessage = `WFH approved - Within ${wfhAllowedRadius} meters of office`;
-                } else {
-                    locationMessage = `WFH approved - Working from home (${Math.round(distance)}m from office)`;
-                }
-            } else {
-                locationMessage = "WFH approved - Working from home";
-            }
+            locationMessage = "Remote work approved - No location restriction";
         } else {
-            // NOT WFH - Must be in office
             if (officeLatitude && officeLongitude) {
-                const distance = calculateDistance(
-                    latitude, 
-                    longitude, 
-                    officeLatitude, 
-                    officeLongitude
-                );
-                
+                const distance = calculateDistance(latitude, longitude, officeLatitude, officeLongitude);
                 if (distance <= allowedRadius) {
                     locationValid = true;
                     locationMessage = `Within office radius (${Math.round(distance)}m)`;
@@ -306,89 +273,135 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                     locationMessage = `You are ${Math.round(distance)}m away. Must be within ${allowedRadius}m`;
                 }
             } else {
-                // No office location configured - allow (fallback)
                 locationValid = true;
                 locationMessage = "Office location not configured - location check skipped";
             }
         }
 
-        // Reject if location invalid
         if (!locationValid) {
             res.status(400).json({
                 message: locationMessage,
                 code: "LOCATION_INVALID",
-                requiresWFH: true,
-                isWFH: false
+                requiresRemote: true,
+                isRemote: false
             });
             return;
         }
 
-        // Check if attendance already exists
+        // ============================================================
+        // ✅ CHECK FOR EXISTING ATTENDANCE RECORD WITH clockIn
+        // ============================================================
         const [rows]: any = await pool.query(
             "SELECT * FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
             [userId, today],
         );
 
+        // ✅ Check if there's a record with clockIn already
+        const existingClockInRecord = rows.find((r: any) => r.clockIn !== null);
+
         // ============================================================
         // CLOCK IN
         // ============================================================
-        if (!rows.length) {
-            let attendanceStatus = currentTime <= lateTime ? "Present" : "Late";
-            
-            // If WFH, update status
-            if (isWFH) {
-                attendanceStatus = "Present (Remote)";
+        if (!rows.length || !existingClockInRecord) {
+            let attendanceStatus = "Present";
+            const type = isRemote ? "Remote" : "Onsite";
+
+            if (isRemote) {
+                // ✅ Remote - Check for late
+                if (currentTime > lateTime) {
+                    attendanceStatus = "Late (Remote)";
+                } else {
+                    attendanceStatus = "Present (Remote)";
+                }
+            } else {
+                // ✅ Onsite - Check for late
+                if (currentTime > lateTime) {
+                    attendanceStatus = "Late";
+                } else {
+                    attendanceStatus = "Present";
+                }
             }
 
-            const [result] = await pool.query(
-                `INSERT INTO attendance 
-                 (userId, clockIn, date, attendanceStatus, status, 
-                  latitude, longitude, clockInLatitude, clockInLongitude,
-                  isWFH, wfhRequestId) 
-                 VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?)`,
-                [
-                    userId, 
-                    currentTime, 
-                    today, 
-                    attendanceStatus,
-                    latitude,
-                    longitude,
-                    latitude,
-                    longitude,
-                    isWFH ? 1 : 0,
-                    isWFH ? wfhRequestData?.id : null
-                ],
-            );
-
-            // Log WFH location if applicable
-            if (isWFH) {
-                await pool.query(
-                    `INSERT INTO wfh_location_tracking 
-                     (userId, attendanceId, latitude, longitude, isVerified) 
-                     VALUES (?, ?, ?, ?, ?)`,
-                    [userId, (result as any).insertId, latitude, longitude, true]
+            // ✅ Check if there's a remote record WITHOUT clockIn to update
+            let existingRecord = null;
+            if (isRemote && remoteRecordId) {
+                const [remoteRecord]: any = await pool.query(
+                    "SELECT * FROM attendance WHERE id = ? AND status = 'Y' AND clockIn IS NULL",
+                    [remoteRecordId]
                 );
+                if (remoteRecord.length > 0) {
+                    existingRecord = remoteRecord[0];
+                }
             }
 
-            res.status(200).json({
-                message: `Clock In successful`,
-                status: attendanceStatus,
-                isWFH: isWFH,
-                locationVerified: locationValid,
-                locationMessage: locationMessage,
-                wfhDetails: isWFH ? {
-                    requestId: wfhRequestData?.id,
-                    fromDate: wfhRequestData?.fromDate,
-                    toDate: wfhRequestData?.toDate
-                } : null
-            });
-            return;
+            if (existingRecord) {
+                // ✅ UPDATE existing remote record with clockIn (NOT clockOut!)
+                await pool.query(
+                    `UPDATE attendance 
+                     SET clockIn = ?, 
+                         attendanceStatus = ?,
+                         latitude = ?,
+                         longitude = ?,
+                         clockInLatitude = ?,
+                         clockInLongitude = ?
+                     WHERE id = ?`,
+                    [
+                        currentTime,
+                        attendanceStatus,
+                        latitude,
+                        longitude,
+                        latitude,
+                        longitude,
+                        existingRecord.id
+                    ]
+                );
+
+                res.status(200).json({
+                    message: `Clock In successful`,
+                    status: attendanceStatus,
+                    type: type,
+                    isRemote: isRemote,
+                    locationVerified: locationValid,
+                    locationMessage: locationMessage,
+                    recordId: existingRecord.id
+                });
+                return;
+            } else {
+                // ✅ INSERT new record (fallback)
+                const [result] = await pool.query(
+                    `INSERT INTO attendance 
+                     (userId, date, clockIn, attendanceStatus, status, 
+                      type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason,
+                      latitude, longitude, clockInLatitude, clockInLongitude) 
+                     VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        userId, today, currentTime, attendanceStatus,
+                        type,
+                        isRemote ? "Approved" : null,
+                        isRemote ? today : null,
+                        isRemote ? today : null,
+                        isRemote ? today : null,
+                        isRemote ? remoteReason || "Remote work" : null,
+                        latitude, longitude, latitude, longitude
+                    ]
+                );
+
+                res.status(200).json({
+                    message: `Clock In successful`,
+                    status: attendanceStatus,
+                    type: type,
+                    isRemote: isRemote,
+                    locationVerified: locationValid,
+                    locationMessage: locationMessage
+                });
+                return;
+            }
         }
 
         // ============================================================
         // CLOCK OUT
         // ============================================================
-        const record = rows[0];
+        const record = existingClockInRecord || rows[0];
 
         if (record.clockOut) {
             res.status(400).json({ 
@@ -397,78 +410,49 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             return;
         }
 
-        // Minimum time check - Prevent clocking out immediately
         const clockInMoment = moment(record.clockIn, "HH:mm:ss");
         const clockOutMoment = moment(currentTime, "HH:mm:ss");
         const durationMinutes = clockOutMoment.diff(clockInMoment, "minutes");
 
         if (durationMinutes < 2) {
-            res.status(400).json({ 
-                message: "You just clocked in. Please wait at least 2 minutes before clocking out.",
-                code: "MINIMUM_TIME_NOT_MET"
+            res.status(400).json({
+                message: "Please wait 2 minutes before clocking out",
+                code: "MINIMUM_TIME"
             });
             return;
         }
 
-        // Calculate working hours
         const durationMilliseconds = clockOutMoment.diff(clockInMoment);
         const diff = moment.utc(durationMilliseconds).format("HH:mm:ss");
 
-        // Determine final attendance status
+        // ✅ Keep remote status (whether Late (Remote) or Present (Remote))
         let finalStatus;
-        if (isWFH) {
-            // If WFH, keep as Present (Remote)
-            finalStatus = "Present (Remote)";
+        if (record.type === "Remote") {
+            finalStatus = record.attendanceStatus;
         } else {
             finalStatus = determineAttendanceStatus(
-                record.clockIn,
-                currentTime,
-                startTime,
-                endTime,
-                lateTime,
-                halfLeave,
-                shortLeaveThreshold,
-                record.attendanceStatus
+                record.clockIn, currentTime, startTime, endTime,
+                lateTime, halfLeave, shortLeaveThreshold, record.attendanceStatus
             );
         }
 
-        // Update attendance
+        // ✅ UPDATE clockOut (NOT clockIn!)
         await pool.query(
             `UPDATE attendance 
              SET clockOut = ?, 
                  workingHours = ?, 
                  attendanceStatus = ?,
                  clockOutLatitude = ?,
-                 clockOutLongitude = ?,
-                 isWFH = ?,
-                 wfhRequestId = ?
+                 clockOutLongitude = ?
              WHERE id = ?`,
-            [
-                currentTime, 
-                diff, 
-                finalStatus,
-                latitude,
-                longitude,
-                isWFH ? 1 : 0,
-                isWFH ? wfhRequestData?.id : null,
-                record.id
-            ],
+            [currentTime, diff, finalStatus, latitude, longitude, record.id]
         );
-
-        // Log WFH location on clock out
-        if (isWFH) {
-            await pool.query(
-                `INSERT INTO wfh_location_tracking 
-                 (userId, attendanceId, latitude, longitude, isVerified) 
-                 VALUES (?, ?, ?, ?, ?)`,
-                [userId, record.id, latitude, longitude, true]
-            );
-        }
 
         res.status(200).json({
             message: "Clock Out successful",
             status: finalStatus,
-            isWFH: isWFH,
+            type: record.type,
+            isRemote: record.type === "Remote",
             duration: `${durationMinutes} mins`,
             locationVerified: locationValid,
             locationMessage: locationMessage
@@ -476,14 +460,12 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
 
     } catch (error) {
         console.error("Mark Attendance Error:", error);
-        if (!res.headersSent) {
-            res.status(500).json({ message: "Internal server error" });
-        }
+        res.status(500).json({ message: "Internal server error" });
     }
 };
 
 // ============================================================
-// UPDATED: Get Attendance for Admin
+// GET ATTENDANCE FOR ADMIN
 // ============================================================
 export const getAttendanceForAdmin = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -493,7 +475,9 @@ export const getAttendanceForAdmin = async (req: Request, res: Response): Promis
         const [rows]: any = await pool.query(
             `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
                     latitude, longitude, clockInLatitude, clockInLongitude, 
-                    clockOutLatitude, clockOutLongitude, status, isWFH, wfhRequestId
+                    clockOutLatitude, clockOutLongitude, status,
+                    type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
+                    remoteReason, remoteApprovedBy, remoteApprovedAt, remoteRejectedReason
              FROM attendance 
              WHERE userId = ? AND date = ?`,
             [userId, today],

@@ -3,6 +3,7 @@ import pool from "../../database/db";
 import { AuthenticatedRequest } from "../../middleware/middleware";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
 import fs from "fs";
+import { addCrmActivity } from "./activity.controller";
 import path from "path";
 
 // ============================================
@@ -588,6 +589,7 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
             `Lead auto-converted to customer upon becoming Won`,
           ]
         );
+        
 
         // ✅ Log activity
         await logActivity(
@@ -599,6 +601,35 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
           { lead_id: id, company_name: leadData.company_name },
           `Lead auto-converted to customer: ${leadData.company_name}`
         );
+                // ============================================
+        // ✅ ADD THIS AUTO-LOGGING CODE HERE
+        // ============================================
+
+        // Log conversion to crm_activities
+        await addCrmActivity(
+          'lead',
+          parseInt(id),
+          'Note',
+          `Lead converted to customer: ${leadData.company_name}`,
+          `Lead auto-converted to customer upon becoming Won`,
+          new Date().toISOString().split('T')[0],
+          new Date().toTimeString().slice(0, 5),
+          req.user.id
+        );
+
+        // Also log status change
+        await addCrmActivity(
+          'lead',
+          parseInt(id),
+          'Status Change',
+          `Lead status changed to Won (auto-converted)`,
+          `Lead auto-converted to customer`,
+          new Date().toISOString().split('T')[0],
+          new Date().toTimeString().slice(0, 5),
+          req.user.id
+        );
+
+        // ✅ END OF AUTO-LOGGING CODE
 
         console.log(`✅ Lead ${id} auto-converted to customer ${customerId}`);
 
@@ -728,6 +759,44 @@ export const updateLeadStatus = async (
         comments || `Status changed from ${oldStatus} to ${lead_status}`,
       ]
     );
+        // ============================================
+    // ✅ ADD THIS AUTO-LOGGING CODE HERE
+    // ============================================
+
+    // Log status change to crm_activities
+    await addCrmActivity(
+      'lead',
+      parseInt(id),
+      'Status Change',
+      `Lead status changed to ${lead_status}`,
+      comments || `Status changed from ${oldStatus} to ${lead_status}`,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      req.user.id
+    );
+
+    // If status became Won, log conversion too
+    if (lead_status === 'Won' && oldStatus !== 'Won') {
+      const [existingCustomer] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM customers WHERE lead_id = ? AND customerStatus = 'Y'`,
+        [id]
+      );
+      
+      if (existingCustomer.length > 0) {
+        await addCrmActivity(
+          'lead',
+          parseInt(id),
+          'Note',
+          'Lead converted to customer',
+          `Lead auto-converted to customer upon becoming Won`,
+          new Date().toISOString().split('T')[0],
+          new Date().toTimeString().slice(0, 5),
+          req.user.id
+        );
+      }
+    }
+
+    // ✅ END OF AUTO-LOGGING CODE
 
     // ✅ If there's a comment, add it
     if (comments) {
@@ -824,7 +893,19 @@ export const addComment = async (
       comment,
       comment
     );
+    // ✅ ADD THIS AUTO-LOGGING CODE HERE
+    // ============================================
 
+    await addCrmActivity(
+      'lead',
+      parseInt(id),
+      'Note',
+      `Comment added: ${comment.substring(0, 50)}${comment.length > 50 ? '...' : ''}`,
+      comment,
+      new Date().toISOString().split('T')[0],
+      new Date().toTimeString().slice(0, 5),
+      req.user.id
+    );
     await logActivity(
       req.user.id,
       "COMMENT_ADDED",
@@ -1168,9 +1249,7 @@ export const bulkUpdatePriority = async (
     res.status(500).json({ message: "Failed to update leads" });
   }
 };
-// ============================================
-// EXPORT LEADS TO CSV/EXCEL
-// ============================================
+
 // ============================================
 // EXPORT LEADS TO CSV
 // ============================================
