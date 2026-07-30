@@ -72,9 +72,9 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
 export const getAllAttendances = async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT a.id, a.userId, u.name, u.email, u.role, a.date, a.clockIn, a.clockOut,
+      `SELECT a.id, a.userId, u.name, u.email, u.role, DATE_FORMAT(a.date, '%Y-%m-%d') AS date, a.clockIn, a.clockOut,
               a.attendanceStatus, a.leaveStatus, a.leaveReason,
-              a.workingHours, DAYNAME(a.date) AS day, a.status,
+              a.workingHours, DAYNAME(DATE(a.date)) AS day, a.status,
               a.latitude, a.longitude, 
               a.clockInLatitude, a.clockInLongitude,
               a.clockOutLatitude, a.clockOutLongitude,
@@ -121,14 +121,14 @@ export const getMyAttendances = async (
           a.id,
           a.userId,
           u.email,
-          a.date,
+        DATE_FORMAT(a.date, '%Y-%m-%d') AS date,
           a.clockIn,
           a.clockOut,
           a.attendanceStatus,
           a.leaveStatus,
           a.leaveReason,
           a.workingHours,
-          DAYNAME(a.date) AS day,
+          DAYNAME(DATE(a.date)) AS day,
           a.status,
           -- ✅ Remote fields
           a.type,
@@ -236,10 +236,10 @@ export const addAttendance = async (
     }
 
     if (finalStatus === "present") {
-      if (!clockIn || !clockOut) {
+      if (!clockIn ) {
         res.status(400).json({
           success: false,
-          message: "Clock In/Out required for 'Present'",
+          message: "Clock In required for 'Present'",
         });
         return;
       }
@@ -347,6 +347,10 @@ export const getAttendanceByUserAndDate = async (
 // ============================================================
 // UPDATE ATTENDANCE - ✅ WITH REMOTE FIELDS
 // ============================================================
+// ============================================================
+// ============================================================
+// UPDATE ATTENDANCE - ✅ WITH PROPER OPTIONAL CLOCKOUT
+// ============================================================
 export const updateAttendance = async (
   req: Request,
   res: Response,
@@ -359,7 +363,7 @@ export const updateAttendance = async (
     clockIn,
     clockOut,
     attendanceStatus: reqStatus,
-    // ✅ Remote fields
+    // ✅ Remote fields (if any)
     type,
     remoteStatus,
     remoteApprovedBy,
@@ -372,26 +376,87 @@ export const updateAttendance = async (
   } = req.body;
 
   try {
+    // ✅ Validate required fields
+    if (!userId || !date || !reqStatus) {
+      res.status(400).json({
+        success: false,
+        message: "Missing required fields: userId, date, or attendanceStatus"
+      });
+      return;
+    }
+
     const formattedDate = toMySQLDate(date);
+    if (!formattedDate) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid date format"
+      });
+      return;
+    }
+
+    // ✅ Check if attendance exists
+    const [existing] = await pool.query<RowDataPacket[]>(
+      "SELECT id, userId FROM attendance WHERE id = ? AND status = 'Y'",
+      [id]
+    );
+
+    if (existing.length === 0) {
+      res.status(404).json({
+        success: false,
+        message: "Attendance record not found"
+      });
+      return;
+    }
+
     const rule = await getAttendanceRule();
 
     let finalStatus = reqStatus?.toLowerCase();
-    let workingHours = calculateWorkingHours(clockIn, clockOut);
+    let workingHours = null;
 
-    if (finalStatus === "present") {
-      if (rule) {
-        if (rule.halfLeave && clockIn >= rule.halfLeave) {
-          finalStatus = "half leave";
-        } else if (rule.lateTime && clockIn >= rule.lateTime) {
-          finalStatus = "late";
-        }
+    // ✅ Determine if this status requires time
+    const requiresTime = ["present", "late", "half leave"].includes(finalStatus);
+
+    // ✅ CLOCK IN validation (REQUIRED for present/late/half leave)
+    if (requiresTime && !clockIn) {
+      res.status(400).json({
+        success: false,
+        message: "Clock In is required for this attendance status"
+      });
+      return;
+    }
+
+    // ✅ CLOCK OUT validation (OPTIONAL - only validate if BOTH are provided)
+    if (requiresTime && clockIn && clockOut) {
+      // Both are provided, validate the time order
+      if (clockIn >= clockOut) {
+        res.status(400).json({
+          success: false,
+          message: "Clock Out time must be after Clock In time"
+        });
+        return;
+      }
+      // Calculate working hours only when both are provided
+      workingHours = calculateWorkingHours(clockIn, clockOut);
+    } else if (requiresTime && clockIn && !clockOut) {
+      // ✅ Only clockIn provided, clockOut is optional - this is allowed!
+      // No working hours calculated
+      workingHours = null;
+    }
+
+    // ✅ Auto-adjust status based on rules (only for 'present')
+    if (finalStatus === "present" && rule) {
+      if (rule.halfLeave && clockIn && clockIn >= rule.halfLeave) {
+        finalStatus = "half leave";
+      } else if (rule.lateTime && clockIn && clockIn >= rule.lateTime) {
+        finalStatus = "late";
       }
     }
 
-    // ✅ Update with remote fields
+    // ✅ Update with remote fields - clockOut can be null
     await pool.query<ResultSetHeader>(
       `UPDATE attendance
-       SET date = ?, 
+       SET userId = ?,
+           date = ?, 
            clockIn = ?, 
            clockOut = ?,
            attendanceStatus = ?, 
@@ -407,9 +472,10 @@ export const updateAttendance = async (
            remoteReason = ?
        WHERE id = ?`,
       [
+        userId,
         formattedDate,
         clockIn || null,
-        clockOut || null,
+        clockOut || null, // ✅ Allow null
         finalStatus,
         workingHours,
         type || 'Onsite',
@@ -426,15 +492,25 @@ export const updateAttendance = async (
     );
 
     res.json({ 
+      success: true,
       message: "Attendance updated successfully",
-      success: true 
+      data: {
+        id,
+        status: finalStatus,
+        workingHours,
+        clockIn: clockIn || null,
+        clockOut: clockOut || null
+      }
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to update attendance." });
+    console.error("❌ Error updating attendance:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Failed to update attendance.",
+      error: error instanceof Error ? error.message : "Unknown error"
+    });
   }
 };
-
 // ============================================================
 // DELETE ATTENDANCE
 // ============================================================

@@ -150,7 +150,7 @@ export const getMyWFHRequests = async (req: Request, res: Response): Promise<voi
 
         let query = `
             SELECT id, userId, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
-                 remoteReason, remoteApprovedAt, remoteRejectedReason, created_at, type
+                 remoteReason, remoteApprovedAt, remoteRejectedReason, createdAt,updatedAt, type
             FROM attendance 
             WHERE userId = ? AND remoteStatus IS NOT NULL AND status = 'Y'
         `;
@@ -272,7 +272,7 @@ export const getAllWFHRequests = async (req: Request, res: Response): Promise<vo
                 a.remoteRejectedReason as wfhRejectedReason,
                 a.remoteApprovedBy as wfhApprovedBy,
                 a.type,
-                a.created_at,
+                a.createdAt,
                 u.name as employeeName,
                 u.email as employeeEmail,
                 (SELECT name FROM tbl_users WHERE id = a.remoteApprovedBy) as approvedByName
@@ -287,7 +287,7 @@ export const getAllWFHRequests = async (req: Request, res: Response): Promise<vo
             params.push(status);
         }
 
-        query += ` ORDER BY a.created_at DESC`;
+        query += ` ORDER BY a.createdAt DESC`;
 
         const [rows] = await pool.query(query, params);
 

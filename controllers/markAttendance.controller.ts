@@ -229,9 +229,12 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         // ============================================================
         // ✅ CHECK FOR REMOTE APPROVAL
         // ============================================================
-        let isRemote = false;
+   let isRemote = false;
         let remoteRecordId = null;
         let remoteReason = null;
+        let remoteFromDateOriginal = null;
+        let remoteToDateOriginal = null;
+        let remoteRequestDateOriginal = null;
 
         if (allowWFH) {
             const [remoteRows]: any = await pool.query(
@@ -249,10 +252,12 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 isRemote = true;
                 remoteRecordId = remoteRows[0].id;
                 remoteReason = remoteRows[0].remoteReason;
+                remoteFromDateOriginal = remoteRows[0].remoteFromDate;
+                remoteToDateOriginal = remoteRows[0].remoteToDate;
+                remoteRequestDateOriginal = remoteRows[0].remoteRequestDate;
                 console.log("✅ Found approved remote record ID:", remoteRecordId);
             }
         }
-
         // ============================================================
         // LOCATION VALIDATION
         // ============================================================
@@ -366,25 +371,31 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                     recordId: existingRecord.id
                 });
                 return;
-            } else {
+         } else {
                 // ✅ INSERT new record (fallback)
+                // NOTE: this is just a daily attendance row against an already-approved
+                // remote request — NOT a new WFH request. remoteStatus stays NULL so it
+                // never shows up as a separate "Approved" request in admin/employee lists.
                 const [result] = await pool.query(
                     `INSERT INTO attendance 
                      (userId, date, clockIn, attendanceStatus, status, 
                       type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason,
+                      parentRequestId,
                       latitude, longitude, clockInLatitude, clockInLongitude) 
-                     VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                     [
                         userId, today, currentTime, attendanceStatus,
                         type,
-                        isRemote ? "Approved" : null,
-                        isRemote ? today : null,
-                        isRemote ? today : null,
-                        isRemote ? today : null,
+                        null,
+                        isRemote ? remoteRequestDateOriginal : null,
+                        isRemote ? remoteFromDateOriginal : null,
+                        isRemote ? remoteToDateOriginal : null,
                         isRemote ? remoteReason || "Remote work" : null,
+                        isRemote ? remoteRecordId : null,
                         latitude, longitude, latitude, longitude
                     ]
                 );
+
 
                 res.status(200).json({
                     message: `Clock In successful`,
