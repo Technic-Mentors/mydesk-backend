@@ -123,10 +123,41 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
             [userId, today, today, fromDate, toDate, reason || null]
         );
 
+        const requestId = (result as any).insertId;
+
+        // ✅ NEW: notify all admins (except if the requester is themselves an admin)
+        try {
+            const [userRows]: any = await pool.query(
+                "SELECT name FROM tbl_users WHERE id = ?",
+                [userId]
+            );
+            const employeeName = userRows[0]?.name || "Employee";
+
+            const [adminUsers]: any = await pool.query(
+                "SELECT id FROM tbl_users WHERE role = 'admin'"
+            );
+
+            for (const admin of adminUsers) {
+                if (admin.id !== Number(userId)) {
+                    await pool.query(
+                        `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+                         VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
+                        [
+                            admin.id,
+                            requestId,
+                            `${employeeName} requested Remote work: ${fromDate} to ${toDate}`
+                        ]
+                    );
+                }
+            }
+        } catch (notifError) {
+            console.error("Notification error (non-critical):", notifError);
+        }
+
         res.status(201).json({
             success: true,
             message: "Remote work request submitted successfully! Waiting for admin approval.",
-            requestId: (result as any).insertId,
+            requestId: requestId,
             status: "Pending",
             data: {
                 userId,
@@ -254,7 +285,6 @@ export const cancelWFHRequest = async (req: Request, res: Response): Promise<voi
 // ============================================================
 
 // ✅ Admin: Get all Remote requests
-// ✅ Admin: Get all Remote requests
 export const getAllWFHRequests = async (req: Request, res: Response): Promise<void> => {
     try {
         const { status } = req.query;
@@ -303,7 +333,6 @@ export const getAllWFHRequests = async (req: Request, res: Response): Promise<vo
     }
 };
 
-// ✅ Admin: Get Remote request by ID
 // ✅ Admin: Get Remote request by ID
 export const getWFHRequestById = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -367,6 +396,20 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
             [adminId, requestId]
         );
 
+        // ✅ NEW: notify the employee
+        try {
+            const empId = request[0].userId;
+            if (empId !== Number(adminId)) {
+                await pool.query(
+                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
+                    [empId, requestId, `Your Remote work request has been Approved`]
+                );
+            }
+        } catch (notifError) {
+            console.error("Notification error (non-critical):", notifError);
+        }
+
         res.status(200).json({
             success: true,
             message: "Remote work request approved successfully",
@@ -408,6 +451,20 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
              WHERE id = ?`,
             [adminId, rejectedReason || null, requestId]
         );
+
+        // ✅ NEW: notify the employee
+        try {
+            const empId = request[0].userId;
+            if (empId !== Number(adminId)) {
+                await pool.query(
+                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
+                    [empId, requestId, `Your Remote work request has been Rejected${rejectedReason ? `: ${rejectedReason}` : ''}`]
+                );
+            }
+        } catch (notifError) {
+            console.error("Notification error (non-critical):", notifError);
+        }
 
         res.status(200).json({
             success: true,
@@ -525,10 +582,25 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
             [userId, today, today, fromDate, toDate, reason || null, approvedBy || null]
         );
 
+        const requestId = (result as any).insertId;
+
+        // ✅ NEW: notify the employee
+        try {
+            if (Number(userId) !== Number(approvedBy)) {
+                await pool.query(
+                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
+                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
+                    [userId, requestId, `A Remote work request (${fromDate} to ${toDate}) has been added and approved for you`]
+                );
+            }
+        } catch (notifError) {
+            console.error("Notification error (non-critical):", notifError);
+        }
+
         res.status(201).json({
             success: true,
             message: "Remote work request added and auto-approved successfully",
-            requestId: (result as any).insertId,
+            requestId: requestId,
             status: "Approved",
             data: {
                 userId,

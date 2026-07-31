@@ -181,7 +181,6 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
 
     const userId = req.user.id;
 
-    // Get today's follow-ups (pending)
     const [todayFollowUps] = await pool.query<RowDataPacket[]>(
       `
       SELECT 
@@ -198,7 +197,6 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
       [userId]
     );
 
-    // Get overdue follow-ups
     const [overdueFollowUps] = await pool.query<RowDataPacket[]>(
       `
       SELECT 
@@ -217,11 +215,12 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
 
     let notificationsCreated = 0;
 
-    // Create notifications for today's follow-ups
+    // ✅ FIXED: dedup check no longer filters by isRead — checks "already notified today" instead,
+    // so a read notification doesn't get silently recreated on the next poll
     for (const followUp of todayFollowUps) {
       const [existing] = await pool.query<RowDataPacket[]>(
         `SELECT id FROM notifications 
-         WHERE referenceId = ? AND type = 'followup' AND userId = ? AND isRead = false`,
+         WHERE referenceId = ? AND type = 'followup' AND userId = ? AND DATE(createdAt) = CURDATE()`,
         [followUp.id, userId]
       );
 
@@ -237,11 +236,10 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
       }
     }
 
-    // Create notifications for overdue follow-ups
     for (const followUp of overdueFollowUps) {
       const [existing] = await pool.query<RowDataPacket[]>(
         `SELECT id FROM notifications 
-         WHERE referenceId = ? AND type = 'followup' AND userId = ? AND isRead = false`,
+         WHERE referenceId = ? AND type = 'followup' AND userId = ? AND DATE(createdAt) = CURDATE()`,
         [followUp.id, userId]
       );
 
