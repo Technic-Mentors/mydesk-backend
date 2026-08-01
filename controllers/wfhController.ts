@@ -5,7 +5,147 @@ import moment from "moment-timezone";
 // ============================================================
 // EMPLOYEE CONTROLLERS
 // ============================================================
+// ✅ Employee: Update their own Remote request (only if Pending)
+// ✅ Employee: Update their own Remote request (only if Pending)
+export const updateMyWFHRequest = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const userId = req.params.id;
+        const { requestId } = req.params;
+        const { fromDate, toDate, reason } = req.body;
 
+        if (!fromDate || !toDate) {
+            res.status(400).json({ 
+                message: "From Date and To Date are required" 
+            });
+            return;
+        }
+
+        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const from = moment.tz(fromDate, "Asia/Karachi");
+        const to = moment.tz(toDate, "Asia/Karachi");
+
+        // Check if dates are valid
+        if (from.isBefore(today)) {
+            res.status(400).json({ 
+                message: "Cannot update to past dates" 
+            });
+            return;
+        }
+
+        if (from.isAfter(to)) {
+            res.status(400).json({ 
+                message: "From Date must be before or equal to To Date" 
+            });
+            return;
+        }
+
+        // ✅ Check if request exists, belongs to user, and is Pending
+        const [request]: any = await pool.query(
+            "SELECT * FROM attendance WHERE id = ? AND userId = ? AND remoteStatus = 'Pending' AND status = 'Y'",
+            [requestId, userId]
+        );
+
+        if (!request.length) {
+            res.status(404).json({ 
+                message: "Request not found or cannot be updated (only Pending requests can be updated)" 
+            });
+            return;
+        }
+
+        // ✅ Check if user already marked attendance for any date in range (excluding this request)
+        const [attendanceRows]: any = await pool.query(
+            `SELECT date FROM attendance 
+             WHERE userId = ? AND date BETWEEN ? AND ? AND status = 'Y' AND clockIn IS NOT NULL
+             AND id != ?`,
+            [userId, fromDate, toDate, requestId]
+        );
+
+        if (attendanceRows.length > 0) {
+            const dates = attendanceRows.map((row: any) => row.date);
+            res.status(400).json({
+                message: `You have already marked attendance on: ${dates.join(', ')}. Cannot update.`
+            });
+            return;
+        }
+
+        // ✅ Check if user has another pending/approved request for these dates (excluding this one)
+        const [existingRemote]: any = await pool.query(
+            `SELECT * FROM attendance 
+             WHERE userId = ? AND remoteStatus IN ('Pending', 'Approved') AND status = 'Y'
+             AND id != ?
+             AND (
+                 (remoteFromDate BETWEEN ? AND ?) OR 
+                 (remoteToDate BETWEEN ? AND ?) OR 
+                 (? BETWEEN remoteFromDate AND remoteToDate)
+             )`,
+            [userId, requestId, fromDate, toDate, fromDate, toDate, fromDate]
+        );
+
+        if (existingRemote.length > 0) {
+            res.status(400).json({
+                message: `You already have a ${existingRemote[0].remoteStatus} Remote request for these dates`
+            });
+            return;
+        }
+
+        // ✅ Check if user is on leave
+        const [leaveRows]: any = await pool.query(
+            `SELECT id FROM leaves 
+             WHERE userId = ? AND leaveStatus = 'Approved' 
+             AND (? BETWEEN fromDate AND toDate OR ? BETWEEN fromDate AND toDate)`,
+            [userId, fromDate, toDate]
+        );
+
+        if (leaveRows.length > 0) {
+            res.status(400).json({
+                message: "You have an approved leave during these dates. Cannot update Remote work."
+            });
+            return;
+        }
+
+        // ✅ Check if dates contain holidays
+        const [holidayRows]: any = await pool.query(
+            `SELECT holiday FROM holidays 
+             WHERE ? BETWEEN fromDate AND toDate 
+             OR ? BETWEEN fromDate AND toDate 
+             AND holidayStatus = 'Y'`,
+            [fromDate, toDate]
+        );
+
+        if (holidayRows.length > 0) {
+            res.status(400).json({
+                message: `Cannot update Remote work during holidays: ${holidayRows.map((h: any) => h.holiday).join(', ')}`
+            });
+            return;
+        }
+
+        // ✅ UPDATE the existing request - DO NOT INSERT NEW
+        await pool.query(
+            `UPDATE attendance 
+             SET remoteFromDate = ?, 
+                 remoteToDate = ?, 
+                 remoteReason = ?,
+                 remoteRequestDate = ?
+             WHERE id = ?`,
+            [fromDate, toDate, reason || null, today, requestId]
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Remote request updated successfully",
+            requestId: requestId,
+            data: {
+                fromDate,
+                toDate,
+                reason: reason || null
+            }
+        });
+
+    } catch (error) {
+        console.error("Update My Remote Request Error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+};
 // ✅ Employee: Request Remote Work
 export const requestWFH = async (req: Request, res: Response): Promise<void> => {
     try {

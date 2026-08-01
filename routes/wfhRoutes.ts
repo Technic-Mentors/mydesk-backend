@@ -8,7 +8,7 @@ import {
     getWFHRequestById,
     approveWFHRequest,
     rejectWFHRequest,
-    getWFHStatistics, adminAddWFHRequest,deleteWFHRequest
+    getWFHStatistics, adminAddWFHRequest,deleteWFHRequest, updateMyWFHRequest 
 } from "../controllers/wfhController";
 
 const router = Router();
@@ -16,7 +16,7 @@ const router = Router();
 // ============================================================
 // EMPLOYEE ROUTES
 // ============================================================
-
+router.put("/:id/update/:requestId", updateMyWFHRequest);
 // Request WFH
 router.post("/:id/request", requestWFH);
 // Admin: Delete WFH request

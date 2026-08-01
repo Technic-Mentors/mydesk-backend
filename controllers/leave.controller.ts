@@ -15,6 +15,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
     DATE_FORMAT(l.fromDate, '%Y-%m-%d') AS fromDate,
     DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
     l.leaveStatus,
+      l.userId,
     u.name
   FROM leaves l
   JOIN tbl_users u ON u.id = l.userId
