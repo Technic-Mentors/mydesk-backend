@@ -5,7 +5,7 @@ import {
   addLeave,
   updateLeave,
   getAllUsers,
-  deleteLeave,
+  deleteLeave, updateLeaveStatus,
 } from "../controllers/leave.controller";
 import { authenticateToken, isAdmin } from "../middleware/middleware";
 
@@ -47,7 +47,12 @@ router.put(
   isAdmin,
   wrapAsync(updateLeave),
 );
-
+router.patch(
+  "/admin/updateLeaveStatus/:id",
+  authenticateToken,
+  isAdmin,
+  wrapAsync(updateLeaveStatus),
+);
 // Delete any leave (admin only)
 router.delete(
   "/admin/deleteLeave/:id",

@@ -222,208 +222,164 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
   }
 };
 
-export const updateLeave = async (
-  req: AuthenticatedRequest,
-  res: Response,
-): Promise<void> => {
+// In leave.controller.ts
+
+export const updateLeave = async (req: ExpressRequest, res: Response) => {
   try {
-    const leaveId = Number(req.params.id);
-    const { leaveStatus, fromDate, toDate, leaveSubject, leaveReason } =
-      req.body;
+    const { id } = req.params;
+    const { 
+      leaveSubject, 
+      leaveReason, 
+      fromDate, 
+      toDate, 
+      leaveStatus 
+    } = req.body;
 
-    // ✅ Check if user is authenticated
-    if (!req.user) {
-      res.status(401).json({ message: "Unauthorized" });
-      return;
+    // Build the update query dynamically based on what fields are provided
+    const updateFields: string[] = [];
+    const values: any[] = [];
+
+    if (leaveSubject !== undefined) {
+      updateFields.push('leaveSubject = ?');
+      values.push(leaveSubject);
     }
 
-    // ✅ Check if user is admin
-    const isAdmin = req.user.role?.toLowerCase() === "admin";
-    
-    console.log(`🔍 User: ${req.user.id}, Role: ${req.user.role}, isAdmin: ${isAdmin}`);
+    if (leaveReason !== undefined) {
+      updateFields.push('leaveReason = ?');
+      values.push(leaveReason);
+    }
 
-    // ✅ Get current leave details first
-    const [currentLeave] = await pool.query<RowDataPacket[]>(
-      `SELECT userId, fromDate as currentFromDate, toDate as currentToDate, leaveStatus as currentStatus, leaveSubject as currentSubject
-       FROM leaves WHERE id = ? AND status = 'Y'`,
-      [leaveId]
+    if (fromDate !== undefined) {
+      updateFields.push('fromDate = ?');
+      values.push(fromDate);
+    }
+
+    if (toDate !== undefined) {
+      updateFields.push('toDate = ?');
+      values.push(toDate);
+    }
+
+    if (leaveStatus !== undefined) {
+      updateFields.push('leaveStatus = ?');
+      values.push(leaveStatus);
+    }
+
+    // If no fields to update, return error
+    if (updateFields.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No fields to update' 
+      });
+    }
+
+    values.push(id);
+
+    const query = `
+      UPDATE leaves 
+      SET ${updateFields.join(', ')} 
+      WHERE id = ?
+    `;
+
+    const [result] = await pool.execute(query, values);
+
+    if ((result as any).affectedRows === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Leave not found' 
+      });
+    }
+
+    // Fetch the updated leave
+    const [updatedRows] = await pool.execute(
+      'SELECT * FROM leaves WHERE id = ?',
+      [id]
     );
 
-    if (currentLeave.length === 0) {
-      res.status(404).json({ message: "Leave not found" });
-      return;
-    }
-
-    const userId = currentLeave[0].userId;
-    const currentStatus = currentLeave[0].currentStatus;
-    const currentSubject = currentLeave[0].currentSubject;
-    const newFromDate = fromDate || currentLeave[0].currentFromDate;
-    const newToDate = toDate || currentLeave[0].currentToDate;
-    const newStatus = leaveStatus || currentLeave[0].currentStatus;
-
-    // ✅ ADMIN: Complete bypass - NO restrictions at all
-    if (isAdmin) {
-      console.log(`✅ ADMIN OVERRIDE: Updating leave ${leaveId} - ${currentStatus} → ${newStatus}`);
-      
-      // Admin can update ANY leave with ANY status, ANY dates, ANY conflicts
-      await pool.query(
-        `UPDATE leaves
-         SET fromDate = ?, toDate = ?, leaveStatus = ?, leaveSubject = ?, leaveReason = ?
-         WHERE id = ?`,
-        [newFromDate, newToDate, newStatus, leaveSubject, leaveReason, leaveId],
-      );
-
-      // ✅ Notify employee when admin changes leave status (approved/rejected)
-      if (
-        (newStatus === "Approved" || newStatus === "Rejected") &&
-        newStatus !== currentStatus &&
-        userId !== req.user.id
-      ) {
-        try {
-          await pool.query(
-            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-             VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
-            [
-              userId,
-              leaveId,
-              `Your leave request (${leaveSubject || currentSubject}) has been ${newStatus} by admin`
-            ]
-          );
-        } catch (notifError) {
-          console.error("Notification error (non-critical):", notifError);
-        }
-      }
-
-      res.status(200).json({
-        message: `Leave updated successfully (Admin override - ${currentStatus} → ${newStatus})`,
-      });
-      return;
-    }
-
-    // ✅ NON-ADMIN: All restrictions apply below
-    console.log(`🔒 Non-admin user: Applying restrictions`);
-
-    // Check if user owns the leave
-    if (req.user.id !== userId) {
-      res.status(403).json({ message: "Forbidden: You don't own this leave" });
-      return;
-    }
-
-    // ❌ Non-admin: Cannot change dates of Approved/Rejected leave
-    if ((fromDate || toDate) && currentStatus !== "Pending") {
-      res.status(403).json({ 
-        message: `Cannot change dates of a ${currentStatus} leave request. Only Pending leaves can be modified.`,
-        status: currentStatus
-      });
-      return;
-    }
-
-    // ❌ Non-admin: Cannot change status of Approved/Rejected leave
-    if (leaveStatus && currentStatus !== "Pending") {
-      res.status(403).json({ 
-        message: `Cannot change status of a ${currentStatus} leave request. Status is locked.`,
-        status: currentStatus
-      });
-      return;
-    }
-
-    // ❌ Non-admin: Check date logic - To Date must be after From Date
-    if (newFromDate && newToDate) {
-      const start = new Date(newFromDate);
-      const end = new Date(newToDate);
-      if (end < start) {
-        res.status(400).json({ 
-          message: "End date must be after start date" 
-        });
-        return;
-      }
-    }
-
-    // ❌ Non-admin: Check joining date conflict
-    const [userRows] = await pool.query<RowDataPacket[]>(
-      "SELECT date FROM tbl_users WHERE id = ?",
-      [userId]
-    );
-
-    if (userRows.length > 0) {
-      const joiningDate = new Date(userRows[0].date);
-      const leaveFromDate = new Date(newFromDate);
-      const leaveToDate = new Date(newToDate);
-
-      if (leaveFromDate < joiningDate || leaveToDate < joiningDate) {
-        res.status(400).json({
-          message: "Leave cannot be applied before employee joining date",
-        });
-        return;
-      }
-    }
-
-    // ❌ Non-admin: Check for overlapping leaves
-    const [overlapping] = await pool.query(
-      `SELECT id FROM leaves 
-       WHERE userId = ? 
-       AND id != ? 
-       AND leaveStatus != 'Rejected'
-       AND status = 'Y'
-       AND ((fromDate <= ? AND toDate >= ?) OR (fromDate <= ? AND toDate >= ?))`,
-      [userId, leaveId, newToDate, newFromDate, newFromDate, newToDate]
-    );
-
-    if ((overlapping as any).length > 0) {
-      res.status(400).json({
-        message: "Leave period overlaps with an existing leave request",
-      });
-      return;
-    }
-
-    // ❌ Non-admin: Check attendance conflict when approving
-    if (newStatus === "Approved") {
-      const [attendanceCheck] = await pool.query<RowDataPacket[]>(
-        `SELECT id, date, clockIn, clockOut, attendanceStatus 
-         FROM attendance 
-         WHERE userId = ? 
-         AND date BETWEEN ? AND ?
-         AND (
-           clockIn IS NOT NULL 
-           OR clockOut IS NOT NULL 
-           OR attendanceStatus IN ('Present', 'Late', 'Short Leave')
-         )
-         LIMIT 1`,
-        [userId, newFromDate, newToDate]
-      );
-
-      if (attendanceCheck.length > 0) {
-        const attendanceDate = new Date(attendanceCheck[0].date).toLocaleDateString();
-        const clockInTime = attendanceCheck[0].clockIn || 'N/A';
-        const attendanceStatus = attendanceCheck[0].attendanceStatus;
-        
-        res.status(409).json({ 
-          message: `Cannot approve leave. Employee has already marked attendance on ${attendanceDate} (Status: ${attendanceStatus}, Clock In: ${clockInTime}).`,
-          conflictDate: attendanceCheck[0].date,
-          attendanceDetails: {
-            date: attendanceCheck[0].date,
-            clockIn: attendanceCheck[0].clockIn,
-            attendanceStatus: attendanceCheck[0].attendanceStatus
-          }
-        });
-        return;
-      }
-    }
-
-    // ✅ Non-admin: All validations passed - Update the leave
-    await pool.query(
-      `UPDATE leaves
-       SET fromDate = ?, toDate = ?, leaveStatus = ?, leaveSubject = ?, leaveReason = ?
-       WHERE id = ?`,
-      [newFromDate, newToDate, newStatus, leaveSubject, leaveReason, leaveId],
-    );
+    const updatedLeave = (updatedRows as any[])[0];
 
     res.status(200).json({
-      message: "Leave updated successfully",
+      success: true,
+      message: 'Leave updated successfully',
+      data: updatedLeave,
     });
+
   } catch (error) {
-    console.error("Error updating leave:", error);
-    res.status(500).json({ message: "Server error" });
+    console.error('Error updating leave:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to update leave' 
+    });
+  }
+};
+
+export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { leaveStatus } = req.body;
+
+    // 1. Validate input
+    if (!leaveStatus) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'leaveStatus is required' 
+      });
+    }
+
+    // 2. Validate status value
+    const validStatuses = ['Pending', 'Approved', 'Rejected'];
+    if (!validStatuses.includes(leaveStatus)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid leave status. Must be Pending, Approved, or Rejected' 
+      });
+    }
+
+    // 3. Check if leave exists FIRST
+    const [existingRows]: any[] = await pool.execute(
+      'SELECT * FROM leaves WHERE id = ?',
+      [id]
+    );
+
+    if (existingRows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Leave not found' 
+      });
+    }
+
+    // 4. Update ONLY the status field
+    const [result]: any[] = await pool.execute(
+      'UPDATE leaves SET leaveStatus = ? WHERE id = ?',
+      [leaveStatus, id]
+    );
+
+    // 5. Check if update was successful
+    if (result.affectedRows === 0) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to update leave status' 
+      });
+    }
+
+    // 6. Fetch the updated leave
+    const [updatedRows]: any[] = await pool.execute(
+      'SELECT * FROM leaves WHERE id = ?',
+      [id]
+    );
+
+    // 7. Return success with data
+    return res.status(200).json({
+      success: true,
+      message: `Leave ${leaveStatus.toLowerCase()} successfully`,
+      data: updatedRows[0]
+    });
+
+  } catch (error) {
+    console.error('Error updating leave status:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: error instanceof Error ? error.message : 'Failed to update leave status' 
+    });
   }
 };
 

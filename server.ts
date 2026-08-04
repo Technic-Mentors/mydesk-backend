@@ -60,6 +60,8 @@ import followUpRoutes from "./routes/crm/followUp.routes";
 import clientRoutes from "./routes/crm/client.routes";
 import wfhRoutes from "./routes/wfhRoutes";
 import activityRoutes from "./routes/crm/activity.routes";
+import ptofileRoutes from "./routes/profile.routes";
+import profileRoutes from "./routes/profile.routes";
 const app: Application = express();
 
 const PORT: number = parseInt(process.env.PORT || "3002");
@@ -82,6 +84,7 @@ app.use(
 
 app.use(express.static(path.join(__dirname, "dist")));
 app.use("/api", loginRoutes);
+app.use("/api", profileRoutes);
 app.use("/api/admin", userRoutes);
 app.use("/api", followUpRoutes);
 app.use("/api/wfh", wfhRoutes);
