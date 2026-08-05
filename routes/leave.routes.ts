@@ -6,6 +6,7 @@ import {
   updateLeave,
   getAllUsers,
   deleteLeave, updateLeaveStatus,
+  getLeaveStatistics,
 } from "../controllers/leave.controller";
 import { authenticateToken, isAdmin } from "../middleware/middleware";
 
@@ -31,7 +32,13 @@ router.get(
   isAdmin,
   wrapAsync(getUsersLeaves),
 );
-
+// Get leave statistics with date range filter
+router.get(
+    "/admin/statistics",
+    authenticateToken,
+    isAdmin,
+    wrapAsync(getLeaveStatistics)
+);
 // Get all users
 router.get(
   "/admin/getUsers",

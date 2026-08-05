@@ -58,30 +58,178 @@ const determineAttendanceStatus = (
 };
 
 // ============================================================
-// GET ATTENDANCE (Employee)
+// GET ATTENDANCE (Employee) - WITH LEAVE CHECK
 // ============================================================
 export const getAttendance = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.params.id;
         const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
 
-        // Check if user is on leave
+        // ============================================================
+        // 1️⃣ CHECK FOR APPROVED LEAVE TODAY
+        // ============================================================
         const [leaveRows]: any = await pool.query(
+            `SELECT id, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus
+             FROM leaves 
+             WHERE userId = ? 
+             AND ? BETWEEN fromDate AND toDate 
+             AND leaveStatus = 'Approved'
+             AND status = 'Y'
+             LIMIT 1`,
+            [userId, today]
+        );
+
+        if (leaveRows.length > 0) {
+            const leave = leaveRows[0];
+            const leaveTypeUpper = (leave.leaveType || leave.leaveSubject || "").toUpperCase();
+            const isShortLeave = leaveTypeUpper === "SHORT LEAVE";
+            const isHalfDay = leaveTypeUpper === "HALF DAY";
+            const maxClockIns = isShortLeave ? 2 : isHalfDay ? 1 : 0;
+
+            // ✅ FETCH ALL attendance rows for today (ALL cycles)
+            const [attRows]: any = await pool.query(
+                `SELECT id, clockIn, clockOut, workingHours, type, attendanceStatus,
+                        latitude, longitude, clockInLatitude, clockInLongitude,
+                        clockOutLatitude, clockOutLongitude
+                 FROM attendance
+                 WHERE userId = ? AND date = ? AND status = 'Y'
+                 ORDER BY id ASC`,
+                [userId, today]
+            );
+
+            const totalClockIns = attRows.filter((r: any) => r.clockIn !== null).length;
+            const openRecord = attRows.find((r: any) => r.clockIn !== null && r.clockOut === null) || null;
+            const latestRecord = attRows.length > 0 ? attRows[attRows.length - 1] : null;
+            const activeRecord = openRecord || latestRecord;
+
+            // ✅ RETURN ALL CYCLES in the response
+            res.status(200).json({
+                // Active/current record
+                id: activeRecord?.id || null,
+                clockIn: activeRecord?.clockIn || null,
+                clockOut: activeRecord?.clockOut || null,
+                workingHours: activeRecord?.workingHours || null,
+                type: activeRecord?.type || null,
+                attendanceStatus: activeRecord?.attendanceStatus || `Leave (${leave.leaveType || leave.leaveSubject})`,
+                latitude: activeRecord?.latitude || null,
+                longitude: activeRecord?.longitude || null,
+                clockInLatitude: activeRecord?.clockInLatitude || null,
+                clockInLongitude: activeRecord?.clockInLongitude || null,
+                clockOutLatitude: activeRecord?.clockOutLatitude || null,
+                clockOutLongitude: activeRecord?.clockOutLongitude || null,
+                date: today,
+                
+                // Leave info
+                leaveReason: leave.leaveReason,
+                leaveStatus: leave.leaveStatus,
+                leaveType: leave.leaveType || leave.leaveSubject,
+                isLeave: true,
+                isLeaveApproved: true,
+                message: `User is on approved ${leave.leaveType || leave.leaveSubject} leave today.`,
+                fromDate: leave.fromDate,
+                toDate: leave.toDate,
+                
+                // ✅ ALL CYCLES for this day
+                totalClockIns,
+                maxClockIns,
+                canClockInMore: (isShortLeave || isHalfDay) && totalClockIns < maxClockIns,
+                cycles: attRows  // ✅ Returns ALL records (1st and 2nd clock in/out)
+            });
+            return;
+        }
+
+        // ============================================================
+        // 2️⃣ CHECK FOR PENDING LEAVE TODAY
+        // ============================================================
+        const [pendingLeaveRows]: any = await pool.query(
+            `SELECT id, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus
+             FROM leaves 
+             WHERE userId = ? 
+             AND ? BETWEEN fromDate AND toDate 
+             AND leaveStatus = 'Pending'
+             AND status = 'Y'
+             LIMIT 1`,
+            [userId, today]
+        );
+
+        if (pendingLeaveRows.length > 0) {
+            const leave = pendingLeaveRows[0];
+
+            // ✅ FETCH ALL attendance rows for today
+            const [attRows]: any = await pool.query(
+                `SELECT id, clockIn, clockOut, workingHours, type, attendanceStatus,
+                        latitude, longitude, clockInLatitude, clockInLongitude,
+                        clockOutLatitude, clockOutLongitude
+                 FROM attendance
+                 WHERE userId = ? AND date = ? AND status = 'Y'
+                 ORDER BY id ASC`,
+                [userId, today]
+            );
+
+            const openRecord = attRows.find((r: any) => r.clockIn !== null && r.clockOut === null) || null;
+            const latestRecord = attRows.length > 0 ? attRows[attRows.length - 1] : null;
+            const activeRecord = openRecord || latestRecord;
+
+            res.status(200).json({
+                id: activeRecord?.id || null,
+                clockIn: activeRecord?.clockIn || null,
+                clockOut: activeRecord?.clockOut || null,
+                workingHours: activeRecord?.workingHours || null,
+                type: activeRecord?.type || null,
+                attendanceStatus: activeRecord?.attendanceStatus || "Present",
+                latitude: activeRecord?.latitude || null,
+                longitude: activeRecord?.longitude || null,
+                clockInLatitude: activeRecord?.clockInLatitude || null,
+                clockInLongitude: activeRecord?.clockInLongitude || null,
+                clockOutLatitude: activeRecord?.clockOutLatitude || null,
+                clockOutLongitude: activeRecord?.clockOutLongitude || null,
+                date: today,
+                leavePending: true,
+                leaveType: leave.leaveType || leave.leaveSubject,
+                leaveReason: leave.leaveReason,
+                message: `You have a pending ${leave.leaveType || leave.leaveSubject} leave request for today.`,
+                isLeave: false,
+                cycles: attRows  // ✅ Returns all records
+            });
+            return;
+        }
+
+        // ============================================================
+        // 3️⃣ Check if user is on leave (backward compatibility)
+        // ============================================================
+        const [oldLeaveRows]: any = await pool.query(
             `SELECT leaveReason FROM leaves 
              WHERE userId = ? AND leaveStatus = 'Approved' 
              AND ? BETWEEN fromDate AND toDate LIMIT 1`,
             [userId, today],
         );
 
-        if (leaveRows.length > 0) {
+        if (oldLeaveRows.length > 0) {
+            // ✅ Still check for attendance records
+            const [attRows]: any = await pool.query(
+                `SELECT id, clockIn, clockOut, workingHours, type, attendanceStatus,
+                        latitude, longitude, clockInLatitude, clockInLongitude,
+                        clockOutLatitude, clockOutLongitude
+                 FROM attendance
+                 WHERE userId = ? AND date = ? AND status = 'Y'
+                 ORDER BY id ASC`,
+                [userId, today]
+            );
+            
+            const latestRecord = attRows.length > 0 ? attRows[attRows.length - 1] : null;
+            
             res.status(200).json({
                 attendanceStatus: "Leave",
-                message: `User is on Approved Leave: ${leaveRows[0].leaveReason}`,
+                message: `User is on Approved Leave: ${oldLeaveRows[0].leaveReason}`,
+                ...(latestRecord || {}),
+                cycles: attRows
             });
             return;
         }
 
-        // Check if today is a holiday
+        // ============================================================
+        // 4️⃣ Check if today is a holiday
+        // ============================================================
         const [holidayRows]: any = await pool.query(
             `SELECT holiday FROM holidays 
              WHERE ? BETWEEN fromDate AND toDate AND holidayStatus = 'Y' LIMIT 1`,
@@ -96,7 +244,9 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             return;
         }
 
-        // Check attendance rules for weekly off
+        // ============================================================
+        // 5️⃣ Check attendance rules for weekly off
+        // ============================================================
         const [rules]: any = await pool.query(
             "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
         );
@@ -121,7 +271,9 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             }
         }
 
-        // ✅ Get attendance with remote fields
+        // ============================================================
+        // 6️⃣ Get attendance with remote fields (ALL records for today)
+        // ============================================================
         const [rows]: any = await pool.query(
             `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
                     latitude, longitude, clockInLatitude, clockInLongitude, 
@@ -129,7 +281,8 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
                     type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
                     remoteReason, remoteApprovedBy, remoteApprovedAt, remoteRejectedReason
              FROM attendance 
-             WHERE userId = ? AND date = ? AND status = 'Y'`,
+             WHERE userId = ? AND date = ? AND status = 'Y'
+             ORDER BY id ASC`,
             [userId, today],
         );
 
@@ -139,14 +292,22 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
                 date: today,
                 attendanceStatus: "Absent",
                 message: "User has not clocked in today.",
+                cycles: []
             });
             return;
         }
 
-        const record = rows[0];
-        if (record && record.date) {
-            record.date = moment.tz(record.date, "Asia/Karachi").format("YYYY-MM-DD");
-        }
+        // ✅ Get the latest record for the "current" state
+        const latestRecord = rows[rows.length - 1];
+        const openRecord = rows.find((r: any) => r.clockIn !== null && r.clockOut === null) || null;
+        const activeRecord = openRecord || latestRecord;
+
+        // ✅ Return ALL records with cycles
+        const record = {
+            ...activeRecord,
+            cycles: rows,  // ✅ ALL records for today
+            date: activeRecord?.date ? moment.tz(activeRecord.date, "Asia/Karachi").format("YYYY-MM-DD") : today
+        };
 
         res.status(200).json(record);
     } catch (error) {
@@ -166,10 +327,13 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
 // ============================================================
 // MARK ATTENDANCE - Fixed Remote Clock In
 // ============================================================
+// ============================================================
+// MARK ATTENDANCE - WITH LEAVE CHECKS
+// ============================================================
 export const markAttendance = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.params.id;
-        const { latitude, longitude } = req.body;
+        const { latitude, longitude, isRemote } = req.body;
 
         if (!latitude || !longitude) {
             res.status(400).json({
@@ -182,291 +346,221 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
         const currentTime = moment.tz("Asia/Karachi").format("HH:mm:ss");
 
-        // Check leave
+        // ============================================================
+        // 1️⃣ CHECK FOR APPROVED LEAVE TODAY
+        // ============================================================
         const [leaveRows]: any = await pool.query(
-            `SELECT id FROM leaves 
-             WHERE userId = ? AND leaveStatus = 'Approved' 
-             AND ? BETWEEN fromDate AND toDate LIMIT 1`,
-            [userId, today],
+            `SELECT id, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus
+             FROM leaves 
+             WHERE userId = ? 
+             AND ? BETWEEN fromDate AND toDate 
+             AND leaveStatus = 'Approved'
+             AND status = 'Y'
+             LIMIT 1`,
+            [userId, today]
         );
-        if (leaveRows.length > 0) {
-            res.status(400).json({ message: "You are on leave today" });
-            return;
-        }
 
-        // Check holiday
-        const [holidayRows]: any = await pool.query(
-            `SELECT holiday FROM holidays 
-             WHERE ? BETWEEN fromDate AND toDate AND holidayStatus = 'Y' LIMIT 1`,
-            [today],
+        const hasApprovedLeave = leaveRows.length > 0;
+        const leaveData = hasApprovedLeave ? leaveRows[0] : null;
+        const leaveType = hasApprovedLeave ? (leaveData.leaveType || leaveData.leaveSubject || '').toUpperCase() : null;
+        const leaveReason = hasApprovedLeave ? leaveData.leaveReason : null;
+
+        // ============================================================
+        // 2️⃣ CHECK EXISTING ATTENDANCE FOR TODAY
+        // ============================================================
+        const [attendanceRows]: any = await pool.query(
+            "SELECT * FROM attendance WHERE userId = ? AND date = ? AND status = 'Y' ORDER BY id ASC",
+            [userId, today]
         );
-        if (holidayRows.length > 0) {
-            res.status(400).json({ message: `Today is Holiday: ${holidayRows[0].holiday}` });
-            return;
-        }
 
-        // Get attendance rules
-        const [rules]: any = await pool.query(
-            "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
-        );
-        if (!rules.length) {
-            res.status(400).json({ message: "Attendance rules not configured" });
-            return;
-        }
-
-        const {
-            startTime, endTime, lateTime, halfLeave, offDay,
-            officeLatitude, officeLongitude, allowedRadius = 100,
-            shortLeaveThreshold = 120, allowWFH = true
-        } = rules[0];
-
-        const todayDayName = moment.tz("Asia/Karachi").format("dddd");
-        if (offDay && todayDayName.toLowerCase() === offDay.toLowerCase()) {
-            res.status(400).json({ message: `${offDay} is Weekly Off` });
-            return;
-        }
+        // ✅ Check if user has any clockIn today
+        const hasClockIn = attendanceRows.some((r: any) => r.clockIn !== null);
+        const hasOpenClockIn = attendanceRows.some((r: any) => r.clockIn !== null && r.clockOut === null);
+        const openRecord = attendanceRows.find((r: any) => r.clockIn !== null && r.clockOut === null);
+        const totalClockIns = attendanceRows.filter((r: any) => r.clockIn !== null).length;
 
         // ============================================================
-        // ✅ CHECK FOR REMOTE APPROVAL
+        // 3️⃣ DETERMINE MAX CLOCK INS BASED ON LEAVE TYPE
         // ============================================================
-   let isRemote = false;
-        let remoteRecordId = null;
-        let remoteReason = null;
-        let remoteFromDateOriginal = null;
-        let remoteToDateOriginal = null;
-        let remoteRequestDateOriginal = null;
+        let maxClockInsPerDay = 1; // Default for no leave
+        let leaveTypeName = "No Leave";
+        let canClockIn = true;
+        let canClockOut = true;
 
-        if (allowWFH) {
-            const [remoteRows]: any = await pool.query(
-                `SELECT id, remoteStatus, remoteFromDate, remoteToDate, remoteReason, remoteRequestDate
-                 FROM attendance 
-                 WHERE userId = ? 
-                 AND remoteStatus = 'Approved'
-                 AND remoteFromDate <= ? AND remoteToDate >= ?
-                 AND status = 'Y'
-                 LIMIT 1`,
-                [userId, today, today]
-            );
-
-            if (remoteRows.length > 0) {
-                isRemote = true;
-                remoteRecordId = remoteRows[0].id;
-                remoteReason = remoteRows[0].remoteReason;
-                remoteFromDateOriginal = remoteRows[0].remoteFromDate;
-                remoteToDateOriginal = remoteRows[0].remoteToDate;
-                remoteRequestDateOriginal = remoteRows[0].remoteRequestDate;
-                console.log("✅ Found approved remote record ID:", remoteRecordId);
-            }
-        }
-        // ============================================================
-        // LOCATION VALIDATION
-        // ============================================================
-        let locationValid = false;
-        let locationMessage = "";
-
-        if (isRemote) {
-            locationValid = true;
-            locationMessage = "Remote work approved - No location restriction";
-        } else {
-            if (officeLatitude && officeLongitude) {
-                const distance = calculateDistance(latitude, longitude, officeLatitude, officeLongitude);
-                if (distance <= allowedRadius) {
-                    locationValid = true;
-                    locationMessage = `Within office radius (${Math.round(distance)}m)`;
-                } else {
-                    locationValid = false;
-                    locationMessage = `You are ${Math.round(distance)}m away. Must be within ${allowedRadius}m`;
-                }
+        if (hasApprovedLeave) {
+            if (leaveType === 'SHORT LEAVE') {
+                maxClockInsPerDay = 2;
+                leaveTypeName = 'Short Leave';
+                canClockIn = true;
+                canClockOut = true;
+            } else if (leaveType === 'HALF DAY') {
+                maxClockInsPerDay = 1;
+                leaveTypeName = 'Half Day';
+                canClockIn = true;
+                canClockOut = true;
             } else {
-                locationValid = true;
-                locationMessage = "Office location not configured - location check skipped";
+                // FULL DAY, CASUAL, SICK, ANNUAL, FAMILY RESPONSIBILITY
+                maxClockInsPerDay = 0;
+                leaveTypeName = leaveType || 'Leave';
+                canClockIn = false;
+                canClockOut = false;
             }
         }
 
-        if (!locationValid) {
-            res.status(400).json({
-                message: locationMessage,
-                code: "LOCATION_INVALID",
-                requiresRemote: true,
-                isRemote: false
-            });
-            return;
-        }
-
         // ============================================================
-        // ✅ CHECK FOR EXISTING ATTENDANCE RECORD WITH clockIn
+        // 4️⃣ CLOCK OUT LOGIC - Check if user has open clockIn
         // ============================================================
-        const [rows]: any = await pool.query(
-            "SELECT * FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
-            [userId, today],
-        );
-
-        // ✅ Check if there's a record with clockIn already
-        const existingClockInRecord = rows.find((r: any) => r.clockIn !== null);
-
-        // ============================================================
-        // CLOCK IN
-        // ============================================================
-        if (!rows.length || !existingClockInRecord) {
-            let attendanceStatus = "Present";
-            const type = isRemote ? "Remote" : "Onsite";
-
-            if (isRemote) {
-                // ✅ Remote - Check for late
-                if (currentTime > lateTime) {
-                    attendanceStatus = "Late (Remote)";
-                } else {
-                    attendanceStatus = "Present (Remote)";
-                }
-            } else {
-                // ✅ Onsite - Check for late
-                if (currentTime > lateTime) {
-                    attendanceStatus = "Late";
-                } else {
-                    attendanceStatus = "Present";
-                }
-            }
-
-            // ✅ Check if there's a remote record WITHOUT clockIn to update
-            let existingRecord = null;
-            if (isRemote && remoteRecordId) {
-                const [remoteRecord]: any = await pool.query(
-                    "SELECT * FROM attendance WHERE id = ? AND status = 'Y' AND clockIn IS NULL",
-                    [remoteRecordId]
-                );
-                if (remoteRecord.length > 0) {
-                    existingRecord = remoteRecord[0];
-                }
-            }
-
-            if (existingRecord) {
-                // ✅ UPDATE existing remote record with clockIn (NOT clockOut!)
-                await pool.query(
-                    `UPDATE attendance 
-                     SET clockIn = ?, 
-                         attendanceStatus = ?,
-                         latitude = ?,
-                         longitude = ?,
-                         clockInLatitude = ?,
-                         clockInLongitude = ?
-                     WHERE id = ?`,
-                    [
-                        currentTime,
-                        attendanceStatus,
-                        latitude,
-                        longitude,
-                        latitude,
-                        longitude,
-                        existingRecord.id
-                    ]
-                );
-
-                res.status(200).json({
-                    message: `Clock In successful`,
-                    status: attendanceStatus,
-                    type: type,
-                    isRemote: isRemote,
-                    locationVerified: locationValid,
-                    locationMessage: locationMessage,
-                    recordId: existingRecord.id
-                });
-                return;
-         } else {
-                // ✅ INSERT new record (fallback)
-                // NOTE: this is just a daily attendance row against an already-approved
-                // remote request — NOT a new WFH request. remoteStatus stays NULL so it
-                // never shows up as a separate "Approved" request in admin/employee lists.
-                const [result] = await pool.query(
-                    `INSERT INTO attendance 
-                     (userId, date, clockIn, attendanceStatus, status, 
-                      type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason,
-                      parentRequestId,
-                      latitude, longitude, clockInLatitude, clockInLongitude) 
-                     VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [
-                        userId, today, currentTime, attendanceStatus,
-                        type,
-                        null,
-                        isRemote ? remoteRequestDateOriginal : null,
-                        isRemote ? remoteFromDateOriginal : null,
-                        isRemote ? remoteToDateOriginal : null,
-                        isRemote ? remoteReason || "Remote work" : null,
-                        isRemote ? remoteRecordId : null,
-                        latitude, longitude, latitude, longitude
-                    ]
-                );
-
-
-                res.status(200).json({
-                    message: `Clock In successful`,
-                    status: attendanceStatus,
-                    type: type,
-                    isRemote: isRemote,
-                    locationVerified: locationValid,
-                    locationMessage: locationMessage
+        if (hasOpenClockIn && openRecord) {
+            // ✅ User is trying to clock out
+            
+            // ❌ If leave type doesn't allow clock out (Full Day, etc.)
+            if (hasApprovedLeave && !canClockOut) {
+                res.status(400).json({
+                    message: `You have approved ${leaveTypeName} leave today. Cannot clock out.`,
+                    leaveType: leaveTypeName,
+                    leaveReason: leaveReason,
+                    isLeave: true,
+                    code: "LEAVE_BLOCK"
                 });
                 return;
             }
-        }
 
-        // ============================================================
-        // CLOCK OUT
-        // ============================================================
-        const record = existingClockInRecord || rows[0];
+            const record = openRecord;
+            const clockInMoment = moment(record.clockIn, "HH:mm:ss");
+            const clockOutMoment = moment(currentTime, "HH:mm:ss");
+            const durationMinutes = clockOutMoment.diff(clockInMoment, "minutes");
 
-        if (record.clockOut) {
-            res.status(400).json({ 
-                message: "You have already clocked out for today." 
-            });
-            return;
-        }
+            if (durationMinutes < 2) {
+                res.status(400).json({
+                    message: "Please wait 2 minutes before clocking out",
+                    code: "MINIMUM_TIME"
+                });
+                return;
+            }
 
-        const clockInMoment = moment(record.clockIn, "HH:mm:ss");
-        const clockOutMoment = moment(currentTime, "HH:mm:ss");
-        const durationMinutes = clockOutMoment.diff(clockInMoment, "minutes");
+            const durationMilliseconds = clockOutMoment.diff(clockInMoment);
+            const diff = moment.utc(durationMilliseconds).format("HH:mm:ss");
 
-        if (durationMinutes < 2) {
-            res.status(400).json({
-                message: "Please wait 2 minutes before clocking out",
-                code: "MINIMUM_TIME"
-            });
-            return;
-        }
+            // ✅ Determine final status
+    // ✅ Keep the status already stored at clock-in / leave approval time.
+            // Do NOT recalculate/override with duration-based logic (was wrongly marking "Absent").
+            let finalStatus = record.attendanceStatus || "Present";
 
-        const durationMilliseconds = clockOutMoment.diff(clockInMoment);
-        const diff = moment.utc(durationMilliseconds).format("HH:mm:ss");
+            if (hasApprovedLeave && leaveType === 'SHORT LEAVE') {
+                finalStatus = "Short Leave";
+            } else if (hasApprovedLeave && leaveType === 'HALF DAY') {
+                finalStatus = "Half Leave";
+            }
+            // else: finalStatus stays as record.attendanceStatus (e.g. "Present" / "Late")
 
-        // ✅ Keep remote status (whether Late (Remote) or Present (Remote))
-        let finalStatus;
-        if (record.type === "Remote") {
-            finalStatus = record.attendanceStatus;
-        } else {
-            finalStatus = determineAttendanceStatus(
-                record.clockIn, currentTime, startTime, endTime,
-                lateTime, halfLeave, shortLeaveThreshold, record.attendanceStatus
+            // ✅ UPDATE clockOut
+            await pool.query(
+                `UPDATE attendance 
+                 SET clockOut = ?, 
+                     workingHours = ?, 
+                     attendanceStatus = ?,
+                     clockOutLatitude = ?,
+                     clockOutLongitude = ?
+                 WHERE id = ?`,
+                [currentTime, diff, finalStatus, latitude, longitude, record.id]
             );
+
+            res.status(200).json({
+                message: "Clock Out successful",
+                status: finalStatus,
+                type: record.type,
+                isRemote: record.type === "Remote",
+                isLeave: hasApprovedLeave,
+                leaveType: leaveTypeName,
+                duration: `${durationMinutes} mins`,
+                clockOutNumber: totalClockIns,
+                maxClockIns: maxClockInsPerDay,
+                locationVerified: true
+            });
+            return;
         }
 
-        // ✅ UPDATE clockOut (NOT clockIn!)
-        await pool.query(
-            `UPDATE attendance 
-             SET clockOut = ?, 
-                 workingHours = ?, 
-                 attendanceStatus = ?,
-                 clockOutLatitude = ?,
-                 clockOutLongitude = ?
-             WHERE id = ?`,
-            [currentTime, diff, finalStatus, latitude, longitude, record.id]
+        // ============================================================
+        // 5️⃣ CLOCK IN LOGIC - User is trying to clock in
+        // ============================================================
+        
+        // ❌ If user has completed max clock ins
+        if (hasApprovedLeave && totalClockIns >= maxClockInsPerDay) {
+            res.status(400).json({
+                message: `You have already reached maximum clock ins (${maxClockInsPerDay}) for today.`,
+                maxClockIns: maxClockInsPerDay,
+                totalClockIns: totalClockIns,
+                leaveType: leaveTypeName,
+                isLeave: true,
+                code: "MAX_CLOCK_INS_REACHED"
+            });
+            return;
+        }
+
+        // ❌ If user has completed all clock ins (no leave)
+        if (!hasApprovedLeave && totalClockIns >= 1) {
+            res.status(400).json({
+                message: "You have already clocked in for today.",
+                code: "ALREADY_CLOCKED_IN"
+            });
+            return;
+        }
+
+        // ❌ If leave type doesn't allow clock in (Full Day, etc.)
+        if (hasApprovedLeave && !canClockIn) {
+            res.status(400).json({
+                message: `You have approved ${leaveTypeName} leave today. Cannot clock in.`,
+                leaveType: leaveTypeName,
+                leaveReason: leaveReason,
+                isLeave: true,
+                code: "LEAVE_BLOCK"
+            });
+            return;
+        }
+
+        // ✅ CLOCK IN - Allowed
+        let attendanceStatus = "Present";
+        const type = isRemote ? "Remote" : "Onsite";
+
+        if (hasApprovedLeave && leaveType === 'SHORT LEAVE') {
+            attendanceStatus = "Short Leave";
+        } else if (hasApprovedLeave && leaveType === 'HALF DAY') {
+            attendanceStatus = "Present";
+        } else {
+            // Check for late
+            const [rules]: any = await pool.query(
+                "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
+            );
+            if (rules.length > 0 && currentTime > rules[0].lateTime) {
+                attendanceStatus = "Late";
+            } else {
+                attendanceStatus = "Present";
+            }
+        }
+
+        // ✅ INSERT new attendance record
+        const [result] = await pool.query(
+            `INSERT INTO attendance 
+             (userId, date, clockIn, attendanceStatus, status, type,
+              latitude, longitude, clockInLatitude, clockInLongitude) 
+             VALUES (?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?)`,
+            [
+                userId, today, currentTime, attendanceStatus,
+                type,
+                latitude, longitude, latitude, longitude
+            ]
         );
 
         res.status(200).json({
-            message: "Clock Out successful",
-            status: finalStatus,
-            type: record.type,
-            isRemote: record.type === "Remote",
-            duration: `${durationMinutes} mins`,
-            locationVerified: locationValid,
-            locationMessage: locationMessage
+            message: `Clock In successful`,
+            status: attendanceStatus,
+            type: type,
+            isRemote: isRemote,
+            isLeave: hasApprovedLeave,
+            leaveType: leaveTypeName,
+            clockInNumber: totalClockIns + 1,
+            maxClockIns: maxClockInsPerDay,
+            locationVerified: true
         });
 
     } catch (error) {
