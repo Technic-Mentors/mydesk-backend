@@ -5,7 +5,7 @@ import moment from "moment-timezone";
 // ============================================================
 // EMPLOYEE CONTROLLERS
 // ============================================================
-// ✅ Employee: Update their own Remote request (only if Pending)
+
 // ✅ Employee: Update their own Remote request (only if Pending)
 export const updateMyWFHRequest = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -20,11 +20,12 @@ export const updateMyWFHRequest = async (req: Request, res: Response): Promise<v
             return;
         }
 
-        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
-        const from = moment.tz(fromDate, "Asia/Karachi");
-        const to = moment.tz(toDate, "Asia/Karachi");
+        // ✅ FIX: Current date allow karo, sirf past dates block
+        const today = moment.tz("Asia/Karachi").startOf('day');
+        const from = moment.tz(fromDate, "Asia/Karachi").startOf('day');
+        const to = moment.tz(toDate, "Asia/Karachi").startOf('day');
 
-        // Check if dates are valid
+        // ✅ Ab sirf past dates block hongi (today allow hai)
         if (from.isBefore(today)) {
             res.status(400).json({ 
                 message: "Cannot update to past dates" 
@@ -120,6 +121,7 @@ export const updateMyWFHRequest = async (req: Request, res: Response): Promise<v
         }
 
         // ✅ UPDATE the existing request - DO NOT INSERT NEW
+        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
         await pool.query(
             `UPDATE attendance 
              SET remoteFromDate = ?, 
@@ -127,7 +129,7 @@ export const updateMyWFHRequest = async (req: Request, res: Response): Promise<v
                  remoteReason = ?,
                  remoteRequestDate = ?
              WHERE id = ?`,
-            [fromDate, toDate, reason || null, today, requestId]
+            [fromDate, toDate, reason || null, todayStr, requestId]
         );
 
         res.status(200).json({
@@ -146,6 +148,7 @@ export const updateMyWFHRequest = async (req: Request, res: Response): Promise<v
         res.status(500).json({ message: "Internal server error" });
     }
 };
+
 // ✅ Employee: Request Remote Work
 export const requestWFH = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -171,10 +174,12 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
             return;
         }
 
-        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
-        const from = moment.tz(fromDate, "Asia/Karachi");
-        const to = moment.tz(toDate, "Asia/Karachi");
+        // ✅ FIX: Current date allow karo, sirf past dates block
+        const today = moment.tz("Asia/Karachi").startOf('day');
+        const from = moment.tz(fromDate, "Asia/Karachi").startOf('day');
+        const to = moment.tz(toDate, "Asia/Karachi").startOf('day');
 
+        // ✅ Ab sirf past dates block hongi (today allow hai)
         if (from.isBefore(today)) {
             res.status(400).json({ 
                 message: "Cannot request Remote work for past dates" 
@@ -256,11 +261,12 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
         }
 
         // ✅ Insert Remote request into attendance table
+        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
         const [result] = await pool.query(
             `INSERT INTO attendance 
              (userId, date, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, status, type) 
              VALUES (?, ?, 'Pending', ?, ?, ?, ?, 'Y', 'Remote')`,
-            [userId, today, today, fromDate, toDate, reason || null]
+            [userId, todayStr, todayStr, fromDate, toDate, reason || null]
         );
 
         const requestId = (result as any).insertId;
@@ -664,9 +670,18 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
             return;
         }
 
-        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
-        const from = moment.tz(fromDate, "Asia/Karachi");
-        const to = moment.tz(toDate, "Asia/Karachi");
+        // ✅ FIX: Current date allow karo, sirf past dates block
+        const today = moment.tz("Asia/Karachi").startOf('day');
+        const from = moment.tz(fromDate, "Asia/Karachi").startOf('day');
+        const to = moment.tz(toDate, "Asia/Karachi").startOf('day');
+
+        // ✅ Ab sirf past dates block hongi (today allow hai)
+        if (from.isBefore(today)) {
+            res.status(400).json({ 
+                message: "Cannot add Remote work for past dates" 
+            });
+            return;
+        }
 
         if (from.isAfter(to)) {
             res.status(400).json({ 
@@ -714,12 +729,13 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
         }
 
         // ✅ Insert with AUTO-APPROVED status
+        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
         const [result] = await pool.query(
             `INSERT INTO attendance 
              (userId, date, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, 
               remoteApprovedBy, remoteApprovedAt, status, type) 
              VALUES (?, ?, 'Approved', ?, ?, ?, ?, ?, NOW(), 'Y', 'Remote')`,
-            [userId, today, today, fromDate, toDate, reason || null, approvedBy || null]
+            [userId, todayStr, todayStr, fromDate, toDate, reason || null, approvedBy || null]
         );
 
         const requestId = (result as any).insertId;
