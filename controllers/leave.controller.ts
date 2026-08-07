@@ -622,7 +622,189 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
         });
     }
 };
+// ============================================================
+// UPDATE MY LEAVE (Employee) - New Route
+// ============================================================
+export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const { id } = req.params;
+        const { 
+            leaveSubject, 
+            leaveReason, 
+            fromDate, 
+            toDate 
+        } = req.body;
 
+        // ✅ Check if user is authenticated
+        if (!req.user) {
+            return res.status(401).json({ 
+                success: false,
+                message: "Unauthorized - Please login" 
+            });
+        }
+
+        const userId = req.user.id;
+
+        // ✅ Get the leave first to check ownership and status
+        const [leaveRows]: any[] = await pool.execute(
+            'SELECT * FROM leaves WHERE id = ? AND status = "Y"',
+            [id]
+        );
+
+        if (leaveRows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Leave not found or already deleted'
+            });
+        }
+
+        const leave = leaveRows[0];
+
+        // ✅ Check ownership
+        if (leave.userId !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied. You can only edit your own leaves.'
+            });
+        }
+
+        // ✅ Check if leave is Pending
+        if (leave.leaveStatus !== "Pending") {
+            return res.status(403).json({
+                success: false,
+                message: `Access denied. Cannot edit leave with status "${leave.leaveStatus}". Only Pending leaves can be modified.`
+            });
+        }
+
+        // ✅ Build update query (only allowed fields)
+        const updateFields: string[] = [];
+        const values: any[] = [];
+
+        if (leaveSubject !== undefined) {
+            updateFields.push('leaveSubject = ?');
+            values.push(leaveSubject);
+        }
+
+        if (leaveReason !== undefined) {
+            updateFields.push('leaveReason = ?');
+            values.push(leaveReason);
+        }
+
+        if (fromDate !== undefined) {
+            // Validate date - cannot be past
+            const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+            const startDate = new Date(fromDate);
+            const todayDate = new Date(today);
+            todayDate.setHours(0, 0, 0, 0);
+            
+            if (startDate < todayDate) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Cannot change leave to past dates"
+                });
+            }
+            updateFields.push('fromDate = ?');
+            values.push(fromDate);
+        }
+
+        if (toDate !== undefined) {
+            // Validate date - cannot be past
+            const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+            const endDate = new Date(toDate);
+            const todayDate = new Date(today);
+            todayDate.setHours(0, 0, 0, 0);
+            
+            if (endDate < todayDate) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Cannot change leave to past dates"
+                });
+            }
+            updateFields.push('toDate = ?');
+            values.push(toDate);
+        }
+
+        // ✅ Validate date range
+        if (fromDate !== undefined && toDate !== undefined) {
+            const start = new Date(fromDate);
+            const end = new Date(toDate);
+            if (end < start) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'End date must be after start date'
+                });
+            }
+        }
+
+        if (updateFields.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'No fields to update'
+            });
+        }
+
+        // ✅ Check for overlapping leaves
+        const checkFromDate = fromDate || leave.fromDate;
+        const checkToDate = toDate || leave.toDate;
+        
+        const [overlapping] = await pool.query(
+            `SELECT id FROM leaves 
+             WHERE userId = ? 
+             AND id != ?
+             AND leaveStatus != 'Rejected' 
+             AND status = 'Y'
+             AND ((fromDate <= ? AND toDate >= ?) OR (fromDate <= ? AND toDate >= ?))`,
+            [userId, id, checkToDate, checkFromDate, checkFromDate, checkToDate]
+        );
+
+        if ((overlapping as any).length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'You already have a leave request for these dates'
+            });
+        }
+
+        // ✅ Execute update
+        values.push(id);
+        const query = `
+            UPDATE leaves 
+            SET ${updateFields.join(', ')} 
+            WHERE id = ?
+        `;
+
+        const [result] = await pool.execute(query, values);
+
+        if ((result as any).affectedRows === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Leave not found'
+            });
+        }
+
+        // ✅ Get updated leave
+        const [updatedRows] = await pool.execute(
+            'SELECT * FROM leaves WHERE id = ?',
+            [id]
+        );
+
+        const updatedLeave = (updatedRows as any[])[0];
+
+        console.log(`✅ Leave ${id} updated by employee ${req.user.name}`);
+
+        res.status(200).json({
+            success: true,
+            message: 'Leave updated successfully',
+            data: updatedLeave
+        });
+
+    } catch (error) {
+        console.error('Error updating leave:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update leave'
+        });
+    }
+};
 // ============================================================
 // UPDATE LEAVE STATUS (Approve/Reject) - FIXED
 // ============================================================

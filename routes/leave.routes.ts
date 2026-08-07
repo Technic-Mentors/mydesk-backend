@@ -5,8 +5,10 @@ import {
   addLeave,
   updateLeave,
   getAllUsers,
-  deleteLeave, updateLeaveStatus,
-  getLeaveStatistics,
+  deleteLeave, 
+  updateLeaveStatus,
+  getLeaveStatistics, 
+  updateMyLeave,
 } from "../controllers/leave.controller";
 import { authenticateToken, isAdmin } from "../middleware/middleware";
 
@@ -32,13 +34,15 @@ router.get(
   isAdmin,
   wrapAsync(getUsersLeaves),
 );
+
 // Get leave statistics with date range filter
 router.get(
-    "/admin/statistics",
-    authenticateToken,
-    isAdmin,
-    wrapAsync(getLeaveStatistics)
+  "/admin/statistics",
+  authenticateToken,
+  isAdmin,
+  wrapAsync(getLeaveStatistics)
 );
+
 // Get all users
 router.get(
   "/admin/getUsers",
@@ -54,12 +58,15 @@ router.put(
   isAdmin,
   wrapAsync(updateLeave),
 );
+
+// Update leave status (admin only)
 router.patch(
   "/admin/updateLeaveStatus/:id",
   authenticateToken,
   isAdmin,
   wrapAsync(updateLeaveStatus),
 );
+
 // Delete any leave (admin only)
 router.delete(
   "/admin/deleteLeave/:id",
@@ -81,6 +88,13 @@ router.post(
   "/addLeave",
   authenticateToken,
   wrapAsync(addLeave),
+);
+
+// ✅ UPDATE MY OWN LEAVE (Employee) - New route
+router.put(
+  "/updateMyLeave/:id",
+  authenticateToken,
+  wrapAsync(updateMyLeave),
 );
 
 // Delete my own leave (soft delete)

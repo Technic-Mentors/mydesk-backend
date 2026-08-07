@@ -1,6 +1,19 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket } from "mysql2";
+import sanitizeHtml from "sanitize-html";
+
+const sanitizeNote = (dirty: string) =>
+  sanitizeHtml(dirty, {
+    allowedTags: [
+      "b", "strong", "i", "em", "u", "ol", "ul", "li",
+      "h1", "h2", "blockquote", "pre", "code", "a", "hr", "br", "p", "div", "span",
+    ],
+    allowedAttributes: {
+      a: ["href", "target", "rel"],
+    },
+    allowedSchemes: ["http", "https", "mailto"],
+  });
 
 interface AuthenticatedRequest extends Request {
   user?: { id: number; email: string; role: "admin" | "user" };
@@ -151,8 +164,9 @@ export const addProgress = async (
   req: AuthenticatedRequest,
   res: Response,
 ): Promise<void> => {
-  const { projectId, date, note, employee_id: bodyEmployeeId } = req.body;
+const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body;
   const user = req.user;
+  const note = rawNote ? sanitizeNote(rawNote) : rawNote;
 
   const employee_id = user?.role === "admin" ? bodyEmployeeId : user?.id;
 
@@ -254,8 +268,9 @@ export const updateProgress = async (
 ) => {
   try {
     const { id } = req.params;
-    const { employee_id, projectId, date, note, progressStatus } = req.body;
+  const { employee_id, projectId, date, note: rawNote, progressStatus } = req.body;
     const user = req.user;
+    const note = rawNote ? sanitizeNote(rawNote) : rawNote;
 
     if (!id) {
       res.status(400).json({ message: "Progress ID is required" });
