@@ -3,6 +3,25 @@ import pool from "../database/db";
 import moment from "moment-timezone";
 
 // ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+// Get current time in UTC (for database storage)
+const getUTCTime = (): string => {
+    return moment.utc().format("YYYY-MM-DD HH:mm:ss");
+};
+
+// Get current date in Pakistan timezone
+const getPakistanDate = (): string => {
+    return moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+};
+
+// Convert Pakistan time to UTC for storage
+const convertToUTC = (dateTime: string): string => {
+    return moment.tz(dateTime, "Asia/Karachi").utc().format("YYYY-MM-DD HH:mm:ss");
+};
+
+// ============================================================
 // EMPLOYEE CONTROLLERS
 // ============================================================
 
@@ -121,7 +140,7 @@ export const updateMyWFHRequest = async (req: Request, res: Response): Promise<v
         }
 
         // ✅ UPDATE the existing request - DO NOT INSERT NEW
-        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const todayStr = getPakistanDate();
         await pool.query(
             `UPDATE attendance 
              SET remoteFromDate = ?, 
@@ -261,12 +280,13 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
         }
 
         // ✅ Insert Remote request into attendance table
-        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const todayStr = getPakistanDate();
+        const utcTime = getUTCTime();
         const [result] = await pool.query(
             `INSERT INTO attendance 
-             (userId, date, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, status, type) 
-             VALUES (?, ?, 'Pending', ?, ?, ?, ?, 'Y', 'Remote')`,
-            [userId, todayStr, todayStr, fromDate, toDate, reason || null]
+             (userId, date, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, status, type, createdAt, updatedAt) 
+             VALUES (?, ?, 'Pending', ?, ?, ?, ?, 'Y', 'Remote', ?, ?)`,
+            [userId, todayStr, todayStr, fromDate, toDate, reason || null, utcTime, utcTime]
         );
 
         const requestId = (result as any).insertId;
@@ -287,11 +307,13 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
                 if (admin.id !== Number(userId)) {
                     await pool.query(
                         `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                         VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
+                         VALUES (?, ?, 'remote', ?, false, ?, ?)`,
                         [
                             admin.id,
                             requestId,
-                            `${employeeName} requested Remote work: ${fromDate} to ${toDate}`
+                            `${employeeName} requested Remote work: ${fromDate} to ${toDate}`,
+                            utcTime,
+                            utcTime
                         ]
                     );
                 }
@@ -327,7 +349,7 @@ export const getMyWFHRequests = async (req: Request, res: Response): Promise<voi
 
         let query = `
             SELECT id, userId, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
-                 remoteReason, remoteApprovedAt, remoteRejectedReason, createdAt,updatedAt, type
+                 remoteReason, remoteApprovedAt, remoteRejectedReason, createdAt, updatedAt, type
             FROM attendance 
             WHERE userId = ? AND remoteStatus IS NOT NULL AND status = 'Y'
         `;
@@ -358,7 +380,7 @@ export const getMyWFHRequests = async (req: Request, res: Response): Promise<voi
 export const checkWFHStatusForToday = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.params.id;
-        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const today = getPakistanDate();
 
         const [rows]: any = await pool.query(
             `SELECT * FROM attendance 
@@ -449,6 +471,7 @@ export const getAllWFHRequests = async (req: Request, res: Response): Promise<vo
                 a.remoteApprovedBy as wfhApprovedBy,
                 a.type,
                 a.createdAt,
+                a.updatedAt,
                 u.name as employeeName,
                 u.email as employeeEmail,
                 (SELECT name FROM tbl_users WHERE id = a.remoteApprovedBy) as approvedByName
@@ -519,6 +542,7 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
     try {
         const { requestId } = req.params;
         const adminId = req.body.adminId || 1;
+        const utcTime = getUTCTime();
 
         const [request]: any = await pool.query(
             "SELECT * FROM attendance WHERE id = ? AND remoteStatus = 'Pending' AND status = 'Y'",
@@ -536,10 +560,11 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
             `UPDATE attendance 
              SET remoteStatus = 'Approved', 
                  remoteApprovedBy = ?, 
-                 remoteApprovedAt = NOW(),
-                 type = 'Remote'
+                 remoteApprovedAt = ?,
+                 type = 'Remote',
+                 updatedAt = ?
              WHERE id = ?`,
-            [adminId, requestId]
+            [adminId, utcTime, utcTime, requestId]
         );
 
         // ✅ NEW: notify the employee
@@ -548,8 +573,8 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
             if (empId !== Number(adminId)) {
                 await pool.query(
                     `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
-                    [empId, requestId, `Your Remote work request has been Approved`]
+                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
+                    [empId, requestId, `Your Remote work request has been Approved`, utcTime, utcTime]
                 );
             }
         } catch (notifError) {
@@ -574,6 +599,7 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
         const { requestId } = req.params;
         const { rejectedReason } = req.body;
         const adminId = req.body.adminId || 1;
+        const utcTime = getUTCTime();
 
         const [request]: any = await pool.query(
             "SELECT * FROM attendance WHERE id = ? AND remoteStatus = 'Pending' AND status = 'Y'",
@@ -591,11 +617,12 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
             `UPDATE attendance 
              SET remoteStatus = 'Rejected', 
                  remoteApprovedBy = ?, 
-                 remoteApprovedAt = NOW(),
+                 remoteApprovedAt = ?,
                  remoteRejectedReason = ?,
-                 type = 'Onsite'
+                 type = 'Onsite',
+                 updatedAt = ?
              WHERE id = ?`,
-            [adminId, rejectedReason || null, requestId]
+            [adminId, utcTime, rejectedReason || null, utcTime, requestId]
         );
 
         // ✅ NEW: notify the employee
@@ -604,8 +631,8 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
             if (empId !== Number(adminId)) {
                 await pool.query(
                     `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
-                    [empId, requestId, `Your Remote work request has been Rejected${rejectedReason ? `: ${rejectedReason}` : ''}`]
+                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
+                    [empId, requestId, `Your Remote work request has been Rejected${rejectedReason ? `: ${rejectedReason}` : ''}`, utcTime, utcTime]
                 );
             }
         } catch (notifError) {
@@ -628,6 +655,7 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
 export const deleteWFHRequest = async (req: Request, res: Response): Promise<void> => {
     try {
         const { id } = req.params;
+        const utcTime = getUTCTime();
 
         const [request]: any = await pool.query(
             "SELECT * FROM attendance WHERE id = ? AND remoteStatus IS NOT NULL AND status = 'Y'",
@@ -641,10 +669,10 @@ export const deleteWFHRequest = async (req: Request, res: Response): Promise<voi
             return;
         }
 
-        // Soft delete
+        // Soft delete with updatedAt
         await pool.query(
-            "UPDATE attendance SET status = 'N' WHERE id = ?",
-            [id]
+            "UPDATE attendance SET status = 'N', updatedAt = ? WHERE id = ?",
+            [utcTime, id]
         );
 
         res.status(200).json({
@@ -662,6 +690,7 @@ export const deleteWFHRequest = async (req: Request, res: Response): Promise<voi
 export const adminAddWFHRequest = async (req: Request, res: Response): Promise<void> => {
     try {
         const { userId, fromDate, toDate, reason, approvedBy } = req.body;
+        const utcTime = getUTCTime();
 
         if (!userId || !fromDate || !toDate) {
             res.status(400).json({ 
@@ -729,13 +758,13 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
         }
 
         // ✅ Insert with AUTO-APPROVED status
-        const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const todayStr = getPakistanDate();
         const [result] = await pool.query(
             `INSERT INTO attendance 
              (userId, date, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, 
-              remoteApprovedBy, remoteApprovedAt, status, type) 
-             VALUES (?, ?, 'Approved', ?, ?, ?, ?, ?, NOW(), 'Y', 'Remote')`,
-            [userId, todayStr, todayStr, fromDate, toDate, reason || null, approvedBy || null]
+              remoteApprovedBy, remoteApprovedAt, status, type, createdAt, updatedAt) 
+             VALUES (?, ?, 'Approved', ?, ?, ?, ?, ?, ?, 'Y', 'Remote', ?, ?)`,
+            [userId, todayStr, todayStr, fromDate, toDate, reason || null, approvedBy || null, utcTime, utcTime, utcTime]
         );
 
         const requestId = (result as any).insertId;
@@ -745,8 +774,8 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
             if (Number(userId) !== Number(approvedBy)) {
                 await pool.query(
                     `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, NOW(), NOW())`,
-                    [userId, requestId, `A Remote work request (${fromDate} to ${toDate}) has been added and approved for you`]
+                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
+                    [userId, requestId, `A Remote work request (${fromDate} to ${toDate}) has been added and approved for you`, utcTime, utcTime]
                 );
             }
         } catch (notifError) {
@@ -776,17 +805,18 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
 export const getWFHStatistics = async (req: Request, res: Response): Promise<void> => {
     try {
         const { year, month } = req.query;
+        const pakistanDate = getPakistanDate();
 
         let query = `
             SELECT 
                 COUNT(CASE WHEN remoteStatus = 'Pending' THEN 1 END) as pending,
                 COUNT(CASE WHEN remoteStatus = 'Approved' THEN 1 END) as approved,
                 COUNT(CASE WHEN remoteStatus = 'Rejected' THEN 1 END) as rejected,
-                COUNT(CASE WHEN type = 'Remote' AND remoteStatus = 'Approved' AND date = CURDATE() THEN 1 END) as activeRemoteToday
+                COUNT(CASE WHEN type = 'Remote' AND remoteStatus = 'Approved' AND date = ? THEN 1 END) as activeRemoteToday
             FROM attendance
             WHERE remoteStatus IS NOT NULL AND status = 'Y'
         `;
-        const params: any[] = [];
+        const params: any[] = [pakistanDate];
 
         if (year) {
             query += ` AND YEAR(remoteRequestDate) = ?`;
