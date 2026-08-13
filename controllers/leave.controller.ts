@@ -52,6 +52,9 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
 // ============================================================
 // GET MY LEAVES (Employee)
 // ============================================================
+// ============================================================
+// GET MY LEAVES (Employee) - FIXED
+// ============================================================
 export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
     try {
         if (!req.user) return res.status(401).json({ message: "Unauthorized" });
@@ -68,6 +71,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 DATE_FORMAT(l.fromDate, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
                 l.leaveStatus,
+                l.userId,  -- ✅ ADD THIS LINE - Include userId in response
                 u.name
             FROM leaves l
             JOIN tbl_users u ON u.id = l.userId
