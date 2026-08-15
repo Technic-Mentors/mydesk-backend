@@ -76,6 +76,12 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // ✅ ADD THIS - Update loginStatus to 'Y' on successful login
+    await pool.query(
+      "UPDATE tbl_users SET loginStatus = 'Y' WHERE id = ?",
+      [user.id]
+    );
+
     // FETCH PERMISSIONS
     let allowedModules: string[] = [];
 

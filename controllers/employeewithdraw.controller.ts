@@ -27,14 +27,19 @@ export const withdrawEmployee = async (
     }
 
     const insertQuery = `
-  INSERT INTO withdrawals (employee_id, withdrawDate, withdrawReason, withdrawStatus)
-  VALUES (?, CURRENT_DATE, ?, 'Y')
-`;
-    const values = [id, withdrawReason];
+      INSERT INTO withdrawals (employee_id, withdrawDate, withdrawReason, withdrawStatus)
+      VALUES (?, CURRENT_DATE, ?, 'Y')
+    `;
+    await pool.query(insertQuery, [id, withdrawReason]);
 
-    const [result]: any = await pool.query(insertQuery, values);
-
-    const updateQuery = "UPDATE tbl_users SET loginStatus = 'N' WHERE id = ?";
+    // ✅ Updated to update both fields
+    const updateQuery = `
+      UPDATE tbl_users 
+      SET 
+        loginStatus = 'N',
+        status = 'Inactive'
+      WHERE id = ?
+    `;
     await pool.query(updateQuery, [id]);
 
     res.status(201).json({
@@ -124,9 +129,14 @@ export const reActiveEmployee = async (
       [employeeId],
     );
 
-    await pool.query("UPDATE tbl_users SET loginStatus = 'Y' WHERE id = ?", [
-      employeeId,
-    ]);
+await pool.query(
+  `UPDATE tbl_users 
+   SET 
+     loginStatus = 'Y',
+     status = 'Active'
+   WHERE id = ?`,
+  [employeeId]
+);
 
     res.status(200).json({ message: "Employee reactivated successfully" });
   } catch (error) {

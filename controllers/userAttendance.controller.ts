@@ -57,7 +57,24 @@ const getAttendanceRule = async (): Promise<any | null> => {
 export const getUsers = async (req: Request, res: Response): Promise<void> => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, name, role FROM tbl_users WHERE status = 'Y'",
+      `SELECT 
+        id, 
+        name, 
+        email, 
+        contact, 
+        cnic, 
+        address, 
+        date, 
+        role, 
+        status,
+        loginStatus,
+        image,
+        position,
+        salary,
+        created_at,
+        updated_at
+      FROM tbl_users 
+      WHERE status = 'Y'`
     );
     res.json({ users: rows });
   } catch (error) {
@@ -65,7 +82,6 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
     res.status(500).json({ message: "Failed to fetch users." });
   }
 };
-
 // ============================================================
 // GET ALL ATTENDANCES - ✅ WITH REMOTE FIELDS
 // ============================================================

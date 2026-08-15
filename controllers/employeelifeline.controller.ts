@@ -21,9 +21,13 @@ interface EmployeeLifeLine {
 export const getUsers = async (req: Request, res: Response): Promise<void> => {
   try {
     const [rows] = await pool.query<Login[]>(
-      `SELECT id ,name
+      `SELECT 
+         id,
+         name,
+         loginStatus,
+         status
        FROM tbl_users
-       WHERE loginStatus = 'Y'
+       WHERE status = 'Y'
        ORDER BY id DESC`,
     );
 
@@ -31,6 +35,7 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
       id: user.id,
       name: user.name,
       loginStatus: user.loginStatus,
+      status: user.status,
     }));
 
     res.status(200).json({
