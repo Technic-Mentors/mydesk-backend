@@ -364,6 +364,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         const leaveData = hasApprovedLeave ? leaveRows[0] : null;
         const leaveType = hasApprovedLeave ? (leaveData.leaveType || leaveData.leaveSubject || '').toUpperCase() : null;
         const leaveReason = hasApprovedLeave ? leaveData.leaveReason : null;
+        const leaveId = hasApprovedLeave ? leaveData.id : null;
 
         // ============================================================
         // 2️⃣ CHECK EXISTING ATTENDANCE FOR TODAY
@@ -379,6 +380,11 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         const openRecord = attendanceRows.find((r: any) => r.clockIn !== null && r.clockOut === null);
         const totalClockIns = attendanceRows.filter((r: any) => r.clockIn !== null).length;
 
+        // ✅ NEW: Check if user already has a "Leave" attendance record today
+        const hasLeaveAttendance = attendanceRows.some((r: any) => 
+            r.attendanceStatus && r.attendanceStatus.toLowerCase() === 'leave'
+        );
+
         // ============================================================
         // 3️⃣ DETERMINE MAX CLOCK INS BASED ON LEAVE TYPE
         // ============================================================
@@ -386,6 +392,9 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         let leaveTypeName = "No Leave";
         let canClockIn = true;
         let canClockOut = true;
+        let isFullDayLeave = false;
+        let isShortLeave = false;
+        let isHalfDay = false;
 
         if (hasApprovedLeave) {
             if (leaveType === 'SHORT LEAVE') {
@@ -393,22 +402,62 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 leaveTypeName = 'Short Leave';
                 canClockIn = true;
                 canClockOut = true;
+                isShortLeave = true;
             } else if (leaveType === 'HALF DAY') {
                 maxClockInsPerDay = 1;
                 leaveTypeName = 'Half Day';
                 canClockIn = true;
                 canClockOut = true;
+                isHalfDay = true;
             } else {
                 // FULL DAY, CASUAL, SICK, ANNUAL, FAMILY RESPONSIBILITY
                 maxClockInsPerDay = 0;
                 leaveTypeName = leaveType || 'Leave';
                 canClockIn = false;
                 canClockOut = false;
+                isFullDayLeave = true;
             }
         }
 
         // ============================================================
-        // 4️⃣ CLOCK OUT LOGIC - Check if user has open clockIn
+        // 4️⃣ IF FULL DAY LEAVE - Auto mark attendance as "Leave"
+        // ============================================================
+        if (isFullDayLeave && !hasLeaveAttendance) {
+            console.log(`✅ User ${userId} has FULL DAY leave on ${today}. Auto-marking as "Leave" attendance.`);
+            
+            // ✅ Auto-create attendance with status "Leave" (no clock in/out)
+            const result = await pool.query(
+                `INSERT INTO attendance 
+                 (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
+                  latitude, longitude, clockInLatitude, clockInLongitude) 
+                 VALUES (?, ?, NULL, NULL, 'leave', NULL, 'Y', ?, ?, ?, ?)`,
+                [userId, today, latitude, longitude, latitude, longitude]
+            );
+
+            const insertId = (result[0] as any).insertId;
+            console.log(`✅ Auto-created leave attendance record ID: ${insertId} for user ${userId} on ${today}`);
+
+            // ✅ Also ensure leave record exists (already exists, but just in case)
+            // The leave is already in the leaves table from admin approval
+
+            res.status(200).json({
+                message: `✅ Full Day Leave marked automatically`,
+                status: "Leave",
+                type: "Onsite",
+                isRemote: false,
+                isLeave: true,
+                leaveType: leaveTypeName,
+                leaveReason: leaveReason,
+                clockInNumber: 0,
+                maxClockIns: 0,
+                locationVerified: true,
+                autoMarked: true
+            });
+            return;
+        }
+
+        // ============================================================
+        // 5️⃣ CLOCK OUT LOGIC - Check if user has open clockIn
         // ============================================================
         if (hasOpenClockIn && openRecord) {
             // ✅ User is trying to clock out
@@ -442,8 +491,6 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             const diff = moment.utc(durationMilliseconds).format("HH:mm:ss");
 
             // ✅ Determine final status
-    // ✅ Keep the status already stored at clock-in / leave approval time.
-            // Do NOT recalculate/override with duration-based logic (was wrongly marking "Absent").
             let finalStatus = record.attendanceStatus || "Present";
 
             if (hasApprovedLeave && leaveType === 'SHORT LEAVE') {
@@ -481,7 +528,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         }
 
         // ============================================================
-        // 5️⃣ CLOCK IN LOGIC - User is trying to clock in
+        // 6️⃣ CLOCK IN LOGIC - User is trying to clock in
         // ============================================================
         
         // ❌ If user has completed max clock ins

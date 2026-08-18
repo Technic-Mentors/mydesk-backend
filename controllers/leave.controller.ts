@@ -20,10 +20,19 @@ const VALID_LEAVE_TYPES = [
 // ============================================================
 // GET ALL LEAVES (Admin)
 // ============================================================
+// In leaveController.ts - Replace the getUsersLeaves function
+
+// ============================================================
+// GET ALL LEAVES (Admin) - FIXED
+// ============================================================
+// ============================================================
+// GET ALL LEAVES (Admin) - FIXED TO AVOID DUPLICATES
+// ============================================================
 export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) => {
     try {
         const search = (req.query.search as string) || "";
 
+        // 1️⃣ Get regular leave requests
         const query = `
             SELECT 
                 l.id,
@@ -34,17 +43,83 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
                 l.leaveStatus,
                 l.userId,
-                u.name
+                u.name,
+                'leave_request' AS source
             FROM leaves l
             JOIN tbl_users u ON u.id = l.userId
             WHERE (u.name LIKE ? OR l.leaveType LIKE ? OR l.leaveSubject LIKE ?) AND l.status = 'Y'
-            ORDER BY l.id DESC
         `;
 
-        const [rows] = await pool.query<RowDataPacket[]>(query, [`%${search}%`, `%${search}%`, `%${search}%`]);
-        res.json(rows);
+        const [leaveRows] = await pool.query<RowDataPacket[]>(query, [`%${search}%`, `%${search}%`, `%${search}%`]);
+
+        // 2️⃣ Get attendance records with 'leave' status
+        const attendanceQuery = `
+            SELECT 
+                a.id AS attendanceId,
+                a.userId,
+                u.name,
+                u.email,
+                DATE_FORMAT(a.date, '%Y-%m-%d') AS fromDate,
+                DATE_FORMAT(a.date, '%Y-%m-%d') AS toDate,
+                a.attendanceStatus,
+                'attendance' AS source
+            FROM attendance a
+            JOIN tbl_users u ON u.id = a.userId
+            WHERE a.attendanceStatus = 'leave' 
+            AND a.status = 'Y'
+            AND u.name LIKE ?
+        `;
+
+        const [attendanceRows] = await pool.query<RowDataPacket[]>(attendanceQuery, [`%${search}%`]);
+
+        console.log(`📊 Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
+
+        // ✅ NEW: Create a Set of dates that already have leaves (to avoid duplicates)
+        const leaveDateSet = new Set();
+        leaveRows.forEach((leave: any) => {
+            leaveDateSet.add(`${leave.userId}_${leave.fromDate}`);
+        });
+
+        console.log(`📋 Dates with existing leaves:`, Array.from(leaveDateSet));
+
+        // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
+        const transformedAttendance = attendanceRows
+            .filter((att: any) => {
+                // ✅ SKIP if there's already a leave for this user on this date
+                const key = `${att.userId}_${att.fromDate}`;
+                const hasLeave = leaveDateSet.has(key);
+                if (hasLeave) {
+                    console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
+                }
+                return !hasLeave;
+            })
+            .map((att: any) => ({
+                id: -att.attendanceId,
+                leaveSubject: `Leave on ${att.fromDate}`,
+                leaveType: 'FULL DAY',
+                leaveReason: 'Marked as leave in attendance',
+                fromDate: att.fromDate,
+                toDate: att.toDate,
+                leaveStatus: 'Approved',
+                userId: att.userId,
+                name: att.name,
+                source: 'attendance',
+                isFromAttendance: true,
+                attendanceId: att.attendanceId
+            }));
+
+        // 4️⃣ Merge both arrays
+        const mergedLeaves = [...leaveRows, ...transformedAttendance];
+
+        // 5️⃣ Sort by date (newest first)
+        mergedLeaves.sort((a, b) => {
+            return new Date(b.fromDate).getTime() - new Date(a.fromDate).getTime();
+        });
+
+        console.log(`✅ Returning ${mergedLeaves.length} total leaves (${leaveRows.length} from leaves, ${transformedAttendance.length} from attendance)`);
+        res.json(mergedLeaves);
     } catch (error) {
-        console.error(error);
+        console.error("❌ Error in getUsersLeaves:", error);
         res.status(500).json({ message: "Server Error" });
     }
 };
@@ -53,7 +128,11 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
 // GET MY LEAVES (Employee)
 // ============================================================
 // ============================================================
+// ============================================================
 // GET MY LEAVES (Employee) - FIXED
+// ============================================================
+// ============================================================
+// GET MY LEAVES (Employee) - FIXED WITH DUPLICATE PREVENTION
 // ============================================================
 export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -62,6 +141,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
         const userId = req.user.id;
         const search = (req.query.search as string) || "";
 
+        // 1️⃣ Get regular leave requests for this user
         const query = `
             SELECT 
                 l.id,
@@ -71,22 +151,88 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 DATE_FORMAT(l.fromDate, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
                 l.leaveStatus,
-                l.userId,  -- ✅ ADD THIS LINE - Include userId in response
-                u.name
+                l.userId,
+                u.name,
+                'leave_request' AS source
             FROM leaves l
             JOIN tbl_users u ON u.id = l.userId
             WHERE u.id = ? AND (l.leaveSubject LIKE ? OR l.leaveType LIKE ?) AND l.status = 'Y'
-            ORDER BY l.id DESC
         `;
 
-        const [rows] = await pool.query<RowDataPacket[]>(query, [
+        const [leaveRows] = await pool.query<RowDataPacket[]>(query, [
             userId,
             `%${search}%`,
             `%${search}%`,
         ]);
-        res.json(rows);
+
+        // 2️⃣ Get attendance records with 'leave' status for this user
+        const attendanceQuery = `
+            SELECT 
+                a.id AS attendanceId,
+                a.userId,
+                u.name,
+                u.email,
+                DATE_FORMAT(a.date, '%Y-%m-%d') AS fromDate,
+                DATE_FORMAT(a.date, '%Y-%m-%d') AS toDate,
+                a.attendanceStatus,
+                'attendance' AS source
+            FROM attendance a
+            JOIN tbl_users u ON u.id = a.userId
+            WHERE a.userId = ? 
+            AND a.attendanceStatus = 'leave' 
+            AND a.status = 'Y'
+        `;
+
+        const [attendanceRows] = await pool.query<RowDataPacket[]>(attendanceQuery, [userId]);
+
+        console.log(`📊 User ${userId}: Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
+
+        // ✅ NEW: Create a Set of dates that already have leaves (to avoid duplicates)
+        const leaveDateSet = new Set();
+        leaveRows.forEach((leave: any) => {
+            leaveDateSet.add(`${leave.userId}_${leave.fromDate}`);
+        });
+
+        console.log(`📋 Dates with existing leaves for user ${userId}:`, Array.from(leaveDateSet));
+
+        // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
+        const transformedAttendance = attendanceRows
+            .filter((att: any) => {
+                // ✅ SKIP if there's already a leave for this user on this date
+                const key = `${att.userId}_${att.fromDate}`;
+                const hasLeave = leaveDateSet.has(key);
+                if (hasLeave) {
+                    console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
+                }
+                return !hasLeave;
+            })
+            .map((att: any) => ({
+                id: -att.attendanceId,
+                leaveSubject: `Leave on ${att.fromDate}`,
+                leaveType: 'FULL DAY',
+                leaveReason: 'Marked as leave in attendance',
+                fromDate: att.fromDate,
+                toDate: att.toDate,
+                leaveStatus: 'Approved',
+                userId: att.userId,
+                name: att.name,
+                source: 'attendance',
+                isFromAttendance: true,
+                attendanceId: att.attendanceId
+            }));
+
+        // 4️⃣ Merge both arrays
+        const mergedLeaves = [...leaveRows, ...transformedAttendance];
+
+        // 5️⃣ Sort by date (newest first)
+        mergedLeaves.sort((a, b) => {
+            return new Date(b.fromDate).getTime() - new Date(a.fromDate).getTime();
+        });
+
+        console.log(`✅ User ${userId}: Returning ${mergedLeaves.length} total leaves (${leaveRows.length} from leaves, ${transformedAttendance.length} from attendance)`);
+        res.json(mergedLeaves);
     } catch (error) {
-        console.error(error);
+        console.error("❌ Error in getMyLeaves:", error);
         res.status(500).json({ message: "Server Error" });
     }
 };

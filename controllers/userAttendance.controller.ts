@@ -180,7 +180,6 @@ export const addAttendance = async (
     clockIn, 
     clockOut, 
     attendanceStatus: manualStatus,
-    // ✅ Remote fields
     type,
     remoteStatus,
     remoteRequestDate,
@@ -190,9 +189,14 @@ export const addAttendance = async (
     remoteApprovedBy
   } = req.body;
 
+  console.log("🚀 ========== ADD ATTENDANCE START ==========");
+  console.log("📝 Request params:", { userId });
+  console.log("📝 Request body:", req.body);
+
   try {
     const userIdNum = parseInt(userId);
     if (!userIdNum || !date || !manualStatus) {
+      console.log("❌ Validation failed: Missing required fields");
       res
         .status(400)
         .json({ success: false, message: "Missing required fields" });
@@ -201,12 +205,16 @@ export const addAttendance = async (
 
     const formattedDate = toMySQLDate(date);
     if (!formattedDate) {
+      console.log("❌ Validation failed: Invalid date format");
       res.status(400).json({ success: false, message: "Invalid date format" });
       return;
     }
 
+    console.log(`✅ Validated: userId=${userIdNum}, date=${formattedDate}, status=${manualStatus}`);
+
     const rule = await getAttendanceRule();
     if (!rule) {
+      console.log("❌ No active attendance rule found");
       res.status(400).json({
         success: false,
         message: "No active attendance rule found on server.",
@@ -222,6 +230,7 @@ export const addAttendance = async (
       }).format(dateObj);
 
       if (dayName.toLowerCase() === rule.offDay.toLowerCase()) {
+        console.log(`❌ Cannot add attendance on ${rule.offDay} (Weekly Off)`);
         res.status(400).json({
           success: false,
           message: `Cannot add attendance on ${rule.offDay} (Weekly Off)`,
@@ -237,6 +246,7 @@ export const addAttendance = async (
     );
 
     if (existing.length > 0) {
+      console.log(`❌ Attendance already exists for user ${userIdNum} on ${formattedDate}`);
       res.status(400).json({
         success: false,
         message: "Attendance already exists for this date of this Employee",
@@ -247,12 +257,16 @@ export const addAttendance = async (
     let finalStatus = manualStatus.toLowerCase();
     let workingHours = null;
 
+    console.log(`📊 Initial status: ${manualStatus}, Final status after toLowerCase: ${finalStatus}`);
+
     if (clockIn && clockOut) {
       workingHours = calculateWorkingHours(clockIn, clockOut);
+      console.log(`📊 Working hours calculated: ${workingHours}`);
     }
 
     if (finalStatus === "present") {
       if (!clockIn ) {
+        console.log("❌ Clock In required for 'Present'");
         res.status(400).json({
           success: false,
           message: "Clock In required for 'Present'",
@@ -261,12 +275,17 @@ export const addAttendance = async (
       }
       if (rule.halfLeave && clockIn >= rule.halfLeave) {
         finalStatus = "half leave";
+        console.log(`📊 Status changed to: ${finalStatus} (Half Leave)`);
       } else if (rule.lateTime && clockIn >= rule.lateTime) {
         finalStatus = "late";
+        console.log(`📊 Status changed to: ${finalStatus} (Late)`);
       }
     }
 
-    // ✅ Insert with remote fields
+    console.log(`📊 Final status before INSERT: ${finalStatus}`);
+
+    // ✅ Insert attendance
+    console.log("📝 Inserting attendance record...");
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO attendance 
        (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
@@ -289,13 +308,136 @@ export const addAttendance = async (
       ],
     );
 
+    console.log(`✅ Attendance inserted successfully! ID: ${result.insertId}, Status: ${finalStatus}`);
+
+    // ============================================================
+    // ✅ AUTO-CREATE LEAVE IF ATTENDANCE STATUS IS 'LEAVE'
+    // ============================================================
+    console.log(`🔍 Checking if status is 'leave': ${finalStatus === 'leave'}`);
+    
+    if (finalStatus === 'leave') {
+      console.log(`🔍🔍🔍 STATUS IS 'LEAVE' - Attempting to auto-create leave!`);
+      console.log(`📝 User ID: ${userIdNum}, Date: ${formattedDate}`);
+      
+      try {
+        // Check if leave already exists for this date
+        console.log("🔍 Checking for existing leave...");
+        const [existingLeave] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM leaves 
+           WHERE userId = ? AND fromDate = ? AND status = 'Y'`,
+          [userIdNum, formattedDate]
+        );
+
+        console.log(`📋 Existing leave check result: ${existingLeave.length > 0 ? 'FOUND' : 'NOT FOUND'}`);
+        
+        if (existingLeave.length > 0) {
+          console.log(`ℹ️ Leave already exists for user ${userIdNum} on ${formattedDate}`);
+          console.log(`📋 Existing leave ID: ${existingLeave[0].id}`);
+        } else {
+          // Get user name for logging
+          console.log("🔍 Fetching user name...");
+          const [userRows] = await pool.query<RowDataPacket[]>(
+            "SELECT name FROM tbl_users WHERE id = ?",
+            [userIdNum]
+          );
+          const userName = userRows.length > 0 ? userRows[0].name : 'User';
+          console.log(`👤 User name: ${userName}`);
+
+          // Determine leave type
+          let leaveType = req.body.leaveType || 'FULL DAY';
+          console.log(`📊 Raw leaveType from request: ${req.body.leaveType || 'NOT PROVIDED'}`);
+          console.log(`📊 LeaveType before validation: ${leaveType}`);
+          
+          const validLeaveTypes = ['FULL DAY', 'HALF DAY', 'SHORT LEAVE', 'CASUAL LEAVE', 'SICK LEAVE', 'ANNUAL LEAVE', 'FAMILY RESPONSIBILITY'];
+          if (!validLeaveTypes.includes(leaveType.toUpperCase())) {
+            console.log(`⚠️ Invalid leaveType: ${leaveType}, defaulting to FULL DAY`);
+            leaveType = 'FULL DAY';
+          }
+          console.log(`✅ Final leaveType: ${leaveType}`);
+
+          const leaveSubject = req.body.leaveSubject || `Leave on ${formattedDate}`;
+          const leaveReason = req.body.leaveReason || 'Auto-created from attendance marking';
+          
+          console.log(`📝 Leave Subject: ${leaveSubject}`);
+          console.log(`📝 Leave Reason: ${leaveReason}`);
+
+          console.log(`📝 Inserting leave with data:`, {
+            userId: userIdNum,
+            fromDate: formattedDate,
+            toDate: formattedDate,
+            leaveType: leaveType.toUpperCase(),
+            leaveSubject: leaveSubject,
+            leaveReason: leaveReason,
+            leaveStatus: 'Approved',
+            status: 'Y'
+          });
+
+          // Create leave request
+          console.log("📝 Executing INSERT into leaves table...");
+          const [leaveResult] = await pool.query<ResultSetHeader>(
+            `INSERT INTO leaves 
+             (userId, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'Approved', 'Y')`,
+            [
+              userIdNum,
+              formattedDate,
+              formattedDate,
+              leaveType.toUpperCase(),
+              leaveSubject,
+              leaveReason,
+            ]
+          );
+          
+          console.log(`✅✅✅ SUCCESS! Auto-created leave request for ${userName} (ID: ${userIdNum}) on ${formattedDate}`);
+          console.log(`📊 Leave ID: ${leaveResult.insertId}`);
+          console.log(`📊 Leave Type: ${leaveType}`);
+          console.log(`📊 Leave Subject: ${leaveSubject}`);
+          
+          // ✅ Verify the leave was created
+          console.log("🔍 Verifying leave was created...");
+          const [verifyLeave] = await pool.query<RowDataPacket[]>(
+            `SELECT * FROM leaves WHERE id = ?`,
+            [leaveResult.insertId]
+          );
+          
+          if (verifyLeave.length > 0) {
+            console.log(`✅✅✅ VERIFIED: Leave exists in database!`);
+            console.log(`📋 Verified leave data:`, {
+              id: verifyLeave[0].id,
+              userId: verifyLeave[0].userId,
+              fromDate: verifyLeave[0].fromDate,
+              toDate: verifyLeave[0].toDate,
+              leaveType: verifyLeave[0].leaveType,
+              leaveSubject: verifyLeave[0].leaveSubject,
+              leaveStatus: verifyLeave[0].leaveStatus,
+              status: verifyLeave[0].status
+            });
+          } else {
+            console.log(`❌❌❌ VERIFICATION FAILED: Leave not found in database!`);
+          }
+        }
+      } catch (leaveError) {
+        console.error("❌❌❌ ERROR auto-creating leave:", leaveError);
+        console.error("❌ Error details:", leaveError instanceof Error ? leaveError.message : leaveError);
+        console.error("❌ Stack trace:", leaveError instanceof Error ? leaveError.stack : 'No stack trace');
+        // Don't fail the attendance creation, just log the error
+      }
+    } else {
+      console.log(`ℹ️ Status is NOT 'leave' (${finalStatus}), skipping auto-create`);
+    }
+
+    console.log("🚀 ========== ADD ATTENDANCE END ==========");
+    console.log(`✅ Final response: Success, ID: ${result.insertId}, Status: ${finalStatus}`);
+
     res.status(201).json({
       success: true,
       message: "Attendance added successfully",
       data: { id: result.insertId, status: finalStatus },
     });
   } catch (error: any) {
-    console.error("💥 Server Error:", error.message);
+    console.error("💥💥💥 SERVER ERROR:", error);
+    console.error("💥 Error message:", error.message);
+    console.error("💥 Stack trace:", error.stack);
     res.status(500).json({
       success: false,
       message: "Internal server error",
