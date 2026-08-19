@@ -21,6 +21,7 @@ SELECT
   ap.projectId,
   ap.date,
   u.name,
+  u.status as userStatus,  -- ✅ ADD THIS
   p.projectName,
   p.description,
   p.completionStatus
@@ -28,6 +29,7 @@ FROM assignedprojects ap
 JOIN tbl_users u ON u.id = ap.employee_id
 JOIN projects p ON p.id = ap.projectId
 WHERE ap.assignStatus = 'Y'
+  AND u.status = 'Active'   -- ✅ EXCLUDE WITHDRAWN EMPLOYEES
 ORDER BY ap.id DESC
 `;
     const [rows] = await pool.query<AssignedProject[]>(query);
@@ -37,7 +39,6 @@ ORDER BY ap.id DESC
     res.status(500).json({ message: "Server error" });
   }
 };
-
 export const getMyAssignProjects = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.id;
@@ -49,6 +50,7 @@ SELECT
   ap.projectId,
   ap.date,
   u.name,
+  u.status as userStatus,  -- ✅ ADD THIS
   p.projectName,
   p.description,
   p.completionStatus
@@ -56,7 +58,8 @@ FROM assignedprojects ap
 JOIN tbl_users u ON u.id = ap.employee_id
 JOIN projects p ON p.id = ap.projectId
 WHERE ap.assignStatus = 'Y'
-AND ap.employee_id = ?
+  AND ap.employee_id = ?
+  AND u.status = 'Active'   -- ✅ EXCLUDE WITHDRAWN EMPLOYEES
 ORDER BY ap.id DESC
 `;
 
@@ -82,14 +85,22 @@ export const addAssignProject = async (
       return;
     }
 
-    // Check if employee exists
+    // Check if employee exists and is ACTIVE
     const [userRows]: any = await pool.query(
-      "SELECT id FROM tbl_users WHERE id = ?",
+      "SELECT id, status FROM tbl_users WHERE id = ?",
       [employee_id],
     );
 
     if (userRows.length === 0) {
       res.status(404).json({ message: "Employee not found" });
+      return;
+    }
+
+    // ✅ Check if employee is active (not withdrawn)
+    if (userRows[0].status !== 'Active') {
+      res.status(400).json({ 
+        message: "Cannot assign project to withdrawn employee" 
+      });
       return;
     }
 
