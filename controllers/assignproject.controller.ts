@@ -272,7 +272,7 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-// Unassign a specific project (soft delete - sets assignStatus to 'N')
+// Unassign a specific project (soft delete - sets assignStatus to 'N'--)
 export const unassignProject = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;

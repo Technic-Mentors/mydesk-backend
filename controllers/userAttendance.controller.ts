@@ -239,13 +239,34 @@ export const addAttendance = async (
       }
     }
 
-    // Existing Attendance Check
+    let finalStatus = manualStatus.toLowerCase();
+    let workingHours = null;
+
+    // ✅ Existing Attendance Check. Short Leave is allowed up to 2 clock-in/out
+    // cycles for the same day (matching the employee self-service clock-in
+    // flow), so admin can add a second cycle instead of being hard-blocked.
+    // Every other status still allows only a single record per day.
     const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
+      "SELECT id, attendanceStatus FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'",
       [userIdNum, formattedDate],
     );
 
-    if (existing.length > 0) {
+    if (finalStatus === "short leave") {
+      if (existing.length >= 2) {
+        res.status(400).json({
+          success: false,
+          message: "Maximum of 2 clock-in/out cycles reached for Short Leave on this date",
+        });
+        return;
+      }
+      if (existing.some((row) => row.attendanceStatus !== "short leave")) {
+        res.status(400).json({
+          success: false,
+          message: "Attendance already exists for this date with a different status",
+        });
+        return;
+      }
+    } else if (existing.length > 0) {
       console.log(`❌ Attendance already exists for user ${userIdNum} on ${formattedDate}`);
       res.status(400).json({
         success: false,
@@ -253,9 +274,6 @@ export const addAttendance = async (
       });
       return;
     }
-
-    let finalStatus = manualStatus.toLowerCase();
-    let workingHours = null;
 
     console.log(`📊 Initial status: ${manualStatus}, Final status after toLowerCase: ${finalStatus}`);
 
@@ -476,22 +494,27 @@ export const getAttendanceByUserAndDate = async (
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT id, userId, date, clockIn, clockOut, attendanceStatus, workingHours,
               type, remoteStatus, remoteFromDate, remoteToDate, remoteReason
-       FROM attendance 
-       WHERE userId = ? AND date = ? AND status = 'Y'`,
+       FROM attendance
+       WHERE userId = ? AND date = ? AND status = 'Y'
+       ORDER BY id ASC`,
       [userId, formattedDate]
     );
 
     if (rows.length === 0) {
-      res.status(404).json({ 
-        success: false, 
-        message: "No attendance found for this user on this date" 
+      res.status(404).json({
+        success: false,
+        message: "No attendance found for this user on this date"
       });
       return;
     }
 
-    res.json({ 
-      success: true, 
-      data: rows[0] 
+    // ✅ Short Leave (and similar) can have multiple clock-in/out cycles for
+    // the same day. `data` stays the first cycle for backward compatibility,
+    // `cycles` carries every record so the caller can render/edit all of them.
+    res.json({
+      success: true,
+      data: rows[0],
+      cycles: rows
     });
   } catch (error) {
     console.error("Error fetching attendance:", error);
@@ -572,7 +595,7 @@ export const updateAttendance = async (
     let workingHours = null;
 
     // ✅ Determine if this status requires time
-    const requiresTime = ["present", "late", "half leave"].includes(finalStatus);
+    const requiresTime = ["present", "late", "half leave", "short leave"].includes(finalStatus);
 
     // ✅ CLOCK IN validation (REQUIRED for present/late/half leave)
     if (requiresTime && !clockIn) {

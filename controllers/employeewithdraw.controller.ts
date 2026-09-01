@@ -57,37 +57,38 @@ export const getWithdrawnEmployees = async (
   res: Response,
 ): Promise<void> => {
   try {
-    let { page = 1, limit = 10 } = req.query;
-
-    const pageNum = Number(page);
-    const limitNum = Number(limit);
-
-    if (isNaN(pageNum) || isNaN(limitNum) || pageNum < 1 || limitNum < 1) {
-      res.status(400).json({ message: "Invalid pagination values" });
-      return;
-    }
-
-    const offset = (pageNum - 1) * limitNum;
-
+    // ✅ No server-side pagination here: every caller (EmployeeWithdraw.tsx,
+    // UserAttendance.tsx) fetches this once and does its own client-side
+    // search/pagination/lookup. A LIMIT here silently dropped any withdrawal
+    // past the cap (oldest-first), so recently-withdrawn employees could
+    // appear "added" but never show up in the Withdrawn list.
+    //
+    // ✅ Driven by tbl_users.status/loginStatus (LEFT JOIN withdrawals),
+    // not just the withdrawals table. An employee can end up
+    // Inactive/loginStatus=N through paths other than the Withdraw button
+    // (delete, resignation, admin deactivate) — those never insert a
+    // withdrawals row, so an INNER JOIN silently hid them from this list.
+    // Now: inactive/disabled-login employees always show up here, with
+    // whatever withdrawal reason/date is on record if one exists.
     const [rows] = await pool.query(
       `
-      SELECT 
+      SELECT
         w.id AS withdrawalId,
-        w.employee_id AS employeeId,
-        w.withdrawReason,
-        w.withdrawStatus,
-        w.withdrawDate,
+        l.id AS employeeId,
+        COALESCE(w.withdrawReason, 'Not provided') AS withdrawReason,
+        'Y' AS withdrawStatus,
+        COALESCE(w.withdrawDate, DATE(l.updated_at)) AS withdrawDate,
         l.name AS name,
         l.email AS email,
         l.contact AS contact,
         l.date AS joiningDate
-      FROM withdrawals w
-      INNER JOIN tbl_users l ON l.id = w.employee_id
-      WHERE w.withdrawStatus = 'Y'
-      ORDER BY w.id ASC
-      LIMIT ? OFFSET ?
+      FROM tbl_users l
+      LEFT JOIN withdrawals w
+        ON w.employee_id = l.id AND w.withdrawStatus = 'Y'
+      WHERE LOWER(l.role) = 'user'
+        AND (l.status != 'Active' OR l.loginStatus = 'N')
+      ORDER BY l.id ASC
       `,
-      [limitNum, offset],
     );
 
     res.status(200).json(rows);
@@ -112,26 +113,30 @@ export const reActiveEmployee = async (
       return;
     }
 
-    const [existing]: any = await pool.query(
-      "SELECT * FROM withdrawals WHERE employee_id = ? AND withdrawStatus = 'Y'",
+    // ✅ Reactivate based on the employee existing, not on there being a
+    // withdrawals row for them. Someone deactivated via delete/resignation/
+    // admin-deactivate (instead of the Withdraw button) has no withdrawals
+    // row at all, so requiring one here made them impossible to reactivate
+    // from the Withdrawn list.
+    const [userRows]: any = await pool.query(
+      "SELECT id FROM tbl_users WHERE id = ?",
       [employeeId],
     );
 
-    if (existing.length === 0) {
-      res
-        .status(404)
-        .json({ message: "Employee is not withdrawn or does not exist" });
+    if (userRows.length === 0) {
+      res.status(404).json({ message: "Employee does not exist" });
       return;
     }
 
+    // Close out any active withdrawal record, if one happens to exist.
     await pool.query(
-      "UPDATE withdrawals SET withdrawStatus = 'N' WHERE employee_id = ?",
+      "UPDATE withdrawals SET withdrawStatus = 'N' WHERE employee_id = ? AND withdrawStatus = 'Y'",
       [employeeId],
     );
 
 await pool.query(
-  `UPDATE tbl_users 
-   SET 
+  `UPDATE tbl_users
+   SET
      loginStatus = 'Y',
      status = 'Active'
    WHERE id = ?`,

@@ -41,6 +41,8 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 l.leaveReason,
                 DATE_FORMAT(l.fromDate, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
+                l.fromTime,
+                l.toTime,
                 l.leaveStatus,
                 l.userId,
                 u.name,
@@ -150,6 +152,8 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 l.leaveReason,
                 DATE_FORMAT(l.fromDate, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(l.toDate, '%Y-%m-%d') AS toDate,
+                l.fromTime,
+                l.toTime,
                 l.leaveStatus,
                 l.userId,
                 u.name,
@@ -447,19 +451,21 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { 
-            leaveSubject, 
+        const {
+            leaveSubject,
             leaveType,
-            fromDate, 
-            toDate, 
-            leaveReason, 
-            employee_id 
+            fromDate,
+            toDate,
+            fromTime,
+            toTime,
+            leaveReason,
+            employee_id
         } = req.body;
 
         // ✅ Validate required fields
         if (!leaveType || !fromDate || !toDate || !leaveReason) {
-            return res.status(400).json({ 
-                message: "Missing required fields: leaveType, fromDate, toDate, leaveReason" 
+            return res.status(400).json({
+                message: "Missing required fields: leaveType, fromDate, toDate, leaveReason"
             });
         }
 
@@ -496,12 +502,26 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
         }
 
         // ============================================================
-        // ✅ SHORT LEAVE: Must be single day
+        // ✅ SHORT LEAVE: Must be single day, and must include the
+        // requested time window (this is what shows up on the admin panel)
         // ============================================================
         if (leaveTypeValue === 'SHORT LEAVE' && fromDate !== toDate) {
-            return res.status(400).json({ 
-                message: "Short Leave must be for a single day only" 
+            return res.status(400).json({
+                message: "Short Leave must be for a single day only"
             });
+        }
+
+        if (leaveTypeValue === 'SHORT LEAVE') {
+            if (!fromTime || !toTime) {
+                return res.status(400).json({
+                    message: "From Time and To Time are required for Short Leave"
+                });
+            }
+            if (fromTime >= toTime) {
+                return res.status(400).json({
+                    message: "To Time must be after From Time"
+                });
+            }
         }
 
         // ============================================================
@@ -612,16 +632,18 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
         // ✅ INSERT LEAVE - FIXED
         // ============================================================
         const [result] = await pool.query(
-            `INSERT INTO leaves 
-             (userId, fromDate, toDate, leaveSubject, leaveType, leaveReason, leaveStatus)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO leaves
+             (userId, fromDate, toDate, fromTime, toTime, leaveSubject, leaveType, leaveReason, leaveStatus)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                userId, 
-                fromDate, 
-                toDate, 
-                leaveSubject || leaveTypeValue, 
-                leaveTypeValue, 
-                leaveReason, 
+                userId,
+                fromDate,
+                toDate,
+                leaveTypeValue === 'SHORT LEAVE' ? fromTime : null,
+                leaveTypeValue === 'SHORT LEAVE' ? toTime : null,
+                leaveSubject || leaveTypeValue,
+                leaveTypeValue,
+                leaveReason,
                 leaveStatus
             ]
         );
@@ -691,12 +713,14 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
 export const updateLeave = async (req: ExpressRequest, res: Response) => {
     try {
         const { id } = req.params;
-        const { 
-            leaveSubject, 
-            leaveReason, 
-            fromDate, 
-            toDate, 
-            leaveStatus 
+        const {
+            leaveSubject,
+            leaveReason,
+            fromDate,
+            toDate,
+            fromTime,
+            toTime,
+            leaveStatus
         } = req.body;
 
         const updateFields: string[] = [];
@@ -720,6 +744,16 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
         if (toDate !== undefined) {
             updateFields.push('toDate = ?');
             values.push(toDate);
+        }
+
+        if (fromTime !== undefined) {
+            updateFields.push('fromTime = ?');
+            values.push(fromTime || null);
+        }
+
+        if (toTime !== undefined) {
+            updateFields.push('toTime = ?');
+            values.push(toTime || null);
         }
 
         if (leaveStatus !== undefined) {
@@ -778,11 +812,13 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
 export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { id } = req.params;
-        const { 
-            leaveSubject, 
-            leaveReason, 
-            fromDate, 
-            toDate 
+        const {
+            leaveSubject,
+            leaveReason,
+            fromDate,
+            toDate,
+            fromTime,
+            toTime
         } = req.body;
 
         // ✅ Check if user is authenticated
@@ -872,6 +908,24 @@ export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) =>
             }
             updateFields.push('toDate = ?');
             values.push(toDate);
+        }
+
+        if (fromTime !== undefined) {
+            updateFields.push('fromTime = ?');
+            values.push(fromTime || null);
+        }
+
+        if (toTime !== undefined) {
+            updateFields.push('toTime = ?');
+            values.push(toTime || null);
+        }
+
+        // ✅ Validate time range (only meaningful when both are being set)
+        if (fromTime && toTime && fromTime >= toTime) {
+            return res.status(400).json({
+                success: false,
+                message: 'To Time must be after From Time'
+            });
         }
 
         // ✅ Validate date range

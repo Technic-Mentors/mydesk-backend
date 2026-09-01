@@ -287,11 +287,21 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
         );
 
         if (!rows || rows.length === 0) {
+            // ✅ Only mark "Absent" once the configured late-threshold time has
+            // passed. Before office start time (or within the grace/late
+            // window), the employee simply hasn't had the chance to clock in
+            // yet, so leave the status unset instead of jumping to "Absent".
+            const { lateTime } = rules[0];
+            const currentTime = moment.tz("Asia/Karachi").format("HH:mm:ss");
+            const isPastLateThreshold = !!lateTime && currentTime >= lateTime;
+
             res.status(200).json({
                 userId: userId,
                 date: today,
-                attendanceStatus: "Absent",
-                message: "User has not clocked in today.",
+                attendanceStatus: isPastLateThreshold ? "Absent" : "",
+                message: isPastLateThreshold
+                    ? "User has not clocked in today."
+                    : "Attendance not marked yet.",
                 cycles: []
             });
             return;
