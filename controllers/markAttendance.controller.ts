@@ -485,9 +485,16 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         }
 
         // ============================================================
-        // 4.5️⃣ ENFORCE OFFICE GEOFENCE (skipped if remote work is approved today)
+        // 4.5️⃣ ENFORCE OFFICE GEOFENCE (applies to both clock in & clock out;
+        // skipped if remote work is approved today)
         // ============================================================
-        if (!hasApprovedRemoteToday && !isRemote && activeRule && activeRule.officeLatitude && activeRule.officeLongitude) {
+        // ✅ For clock OUT, use the record's own type (set at clock-in) so a user
+        // can't bypass the radius check by sending isRemote=true only when clocking out.
+        const effectiveIsRemote = (hasOpenClockIn && openRecord)
+            ? openRecord.type === "Remote"
+            : !!isRemote;
+
+        if (!hasApprovedRemoteToday && !effectiveIsRemote && activeRule && activeRule.officeLatitude && activeRule.officeLongitude) {
             const distance = calculateDistance(
                 parseFloat(latitude),
                 parseFloat(longitude),
