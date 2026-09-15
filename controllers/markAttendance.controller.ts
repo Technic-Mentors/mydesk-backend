@@ -391,9 +391,27 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         const totalClockIns = attendanceRows.filter((r: any) => r.clockIn !== null).length;
 
         // ✅ NEW: Check if user already has a "Leave" attendance record today
-        const hasLeaveAttendance = attendanceRows.some((r: any) => 
+        const hasLeaveAttendance = attendanceRows.some((r: any) =>
             r.attendanceStatus && r.attendanceStatus.toLowerCase() === 'leave'
         );
+
+        // ============================================================
+        // 2.5️⃣ FETCH ACTIVE ATTENDANCE RULE (late time + office geofence)
+        // ============================================================
+        const [ruleRows]: any = await pool.query(
+            "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1"
+        );
+        const activeRule = ruleRows.length > 0 ? ruleRows[0] : null;
+
+        // ✅ Check if user has an APPROVED remote-work request covering today
+        const [approvedRemoteRows]: any = await pool.query(
+            `SELECT id FROM attendance
+             WHERE userId = ? AND remoteStatus = 'Approved'
+             AND remoteFromDate <= ? AND remoteToDate >= ?
+             AND status = 'Y' LIMIT 1`,
+            [userId, today, today]
+        );
+        const hasApprovedRemoteToday = approvedRemoteRows.length > 0;
 
         // ============================================================
         // 3️⃣ DETERMINE MAX CLOCK INS BASED ON LEAVE TYPE
@@ -464,6 +482,29 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 autoMarked: true
             });
             return;
+        }
+
+        // ============================================================
+        // 4.5️⃣ ENFORCE OFFICE GEOFENCE (skipped if remote work is approved today)
+        // ============================================================
+        if (!hasApprovedRemoteToday && !isRemote && activeRule && activeRule.officeLatitude && activeRule.officeLongitude) {
+            const distance = calculateDistance(
+                parseFloat(latitude),
+                parseFloat(longitude),
+                parseFloat(activeRule.officeLatitude),
+                parseFloat(activeRule.officeLongitude)
+            );
+            const allowedRadius = activeRule.allowedRadius || 100;
+
+            if (distance > allowedRadius) {
+                res.status(400).json({
+                    message: `You must be within ${allowedRadius}m of the office to mark attendance. You are ${Math.round(distance)}m away.`,
+                    code: "OUTSIDE_ALLOWED_RADIUS",
+                    distance: Math.round(distance),
+                    allowedRadius
+                });
+                return;
+            }
         }
 
         // ============================================================
@@ -585,10 +626,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             attendanceStatus = "Present";
         } else {
             // Check for late
-            const [rules]: any = await pool.query(
-                "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
-            );
-            if (rules.length > 0 && currentTime > rules[0].lateTime) {
+            if (activeRule && currentTime > activeRule.lateTime) {
                 attendanceStatus = "Late";
             } else {
                 attendanceStatus = "Present";

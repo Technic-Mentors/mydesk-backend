@@ -12,6 +12,9 @@ interface AttendanceRule {
   year: string;
   status?: string;
   shortLeaveThreshold?: number;
+  officeLatitude?: number | null;
+  officeLongitude?: number | null;
+  allowedRadius?: number;
 }
 
 export const getAllConfigTime = async (
@@ -54,15 +57,18 @@ export const addConfigTime = async (
   res: Response,
 ): Promise<void> => {
   try {
-    const { 
-      startTime, 
-      endTime, 
-      offDay, 
-      lateTime, 
-      halfLeave, 
-      month, 
+    const {
+      startTime,
+      endTime,
+      offDay,
+      lateTime,
+      halfLeave,
+      month,
       year,
-      shortLeaveThreshold 
+      shortLeaveThreshold,
+      officeLatitude,
+      officeLongitude,
+      allowedRadius,
     } = req.body as AttendanceRule;
 
     if (
@@ -84,14 +90,19 @@ export const addConfigTime = async (
     }
 
     const threshold = shortLeaveThreshold || 120;
+    const radius = allowedRadius || 100;
 
     await pool.query("UPDATE attendance_rules SET status = 'Inactive'");
 
     const [result] = await pool.query(
-      `INSERT INTO attendance_rules 
-       (startTime, endTime, offDay, lateTime, halfLeave, month, year, status, shortLeaveThreshold) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active", threshold],
+      `INSERT INTO attendance_rules
+       (startTime, endTime, offDay, lateTime, halfLeave, month, year, status, shortLeaveThreshold,
+        officeLatitude, officeLongitude, allowedRadius)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active", threshold,
+        officeLatitude ?? null, officeLongitude ?? null, radius,
+      ],
     );
 
     res.status(201).json({
@@ -120,6 +131,9 @@ export const updateConfigTime = async (
       year,
       status,
       shortLeaveThreshold,
+      officeLatitude,
+      officeLongitude,
+      allowedRadius,
     } = req.body as AttendanceRule;
 
     const [existing]: any = await pool.query(
@@ -178,18 +192,22 @@ export const updateConfigTime = async (
     }
 
     const threshold = shortLeaveThreshold || 120;
+    const radius = allowedRadius || 100;
 
     const [result] = await pool.query(
-      `UPDATE attendance_rules 
-       SET startTime = ?, 
-           endTime = ?, 
-           offDay = ?, 
-           lateTime = ?, 
-           halfLeave = ?, 
-           month = ?, 
-           year = ?, 
+      `UPDATE attendance_rules
+       SET startTime = ?,
+           endTime = ?,
+           offDay = ?,
+           lateTime = ?,
+           halfLeave = ?,
+           month = ?,
+           year = ?,
            status = ?,
-           shortLeaveThreshold = ?
+           shortLeaveThreshold = ?,
+           officeLatitude = ?,
+           officeLongitude = ?,
+           allowedRadius = ?
        WHERE id = ?`,
       [
         startTime,
@@ -201,6 +219,9 @@ export const updateConfigTime = async (
         year,
         status ?? "Active",
         threshold,
+        officeLatitude ?? null,
+        officeLongitude ?? null,
+        radius,
         id,
       ],
     );
