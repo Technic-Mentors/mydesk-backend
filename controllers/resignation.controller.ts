@@ -247,6 +247,22 @@ export const updateResignation = async (
          WHERE id = ?`,
         [employeeId],
       );
+
+      // Resignation acceptance is the other path (besides the Withdraw button)
+      // that can end an employment — write it into `withdrawals` too so that
+      // table stays the single source of truth for "who left, when, and why"
+      // instead of getWithdrawnEmployees having to reconstruct it from status flags.
+      const [[existingWithdrawal]]: any = await connection.query(
+        `SELECT id FROM withdrawals WHERE employee_id = ? AND withdrawStatus = 'Y'`,
+        [employeeId],
+      );
+      if (!existingWithdrawal) {
+        await connection.query(
+          `INSERT INTO withdrawals (employee_id, withdrawDate, last_working_day, withdrawReason, withdrawStatus, source)
+           VALUES (?, CURRENT_DATE, ?, ?, 'Y', 'resignation')`,
+          [employeeId, resignation_date, note],
+        );
+      }
     }
 
     await connection.commit();

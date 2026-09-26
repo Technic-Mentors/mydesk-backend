@@ -176,6 +176,7 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
       city,
       industry,
       lead_source,
+      contact_method,
       product_interest,
       lead_priority,
       lead_status,
@@ -236,12 +237,12 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO leads (
         company_name, contact_person, designation, mobile_number, whatsapp_number,
-        email, website, country, city, industry, lead_source, product_interest,
+        email, website, country, city, industry, lead_source, contact_method, product_interest,
         lead_priority, lead_status, follow_up_date, follow_up_time, comments,
         file_attachment, assigned_to, created_by,
         deal_value, probability, expected_close_date,
         address, company_size, linkedin, budget, department, manager
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         company_name,
         contact_person,
@@ -254,6 +255,7 @@ export const createLead = async (req: AuthenticatedRequest, res: Response): Prom
         city || null,
         industry || null,
         lead_source || "Other",
+        contact_method || null,
         product_interest || null,
         lead_priority || "Warm",
         lead_status || "New",
@@ -337,6 +339,7 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
       city,
       industry,
       lead_source,
+      contact_method,
       product_interest,
       lead_priority,
       lead_status,
@@ -388,6 +391,7 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
     addField('city', city);
     addField('industry', industry);
     addField('lead_source', lead_source);
+    addField('contact_method', contact_method);
     addField('product_interest', product_interest);
     addField('lead_priority', lead_priority);
     addField('lead_status', lead_status);

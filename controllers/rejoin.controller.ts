@@ -256,6 +256,17 @@ export const updateRejoinRequest = async (
       employee_id,
     ]);
 
+    // A resignation-acceptance now writes a withdrawals row (see
+    // resignation.controller.ts) — close it out on rejoin, same as
+    // reActiveEmployee already does for the Withdraw-button path, so this
+    // person stops showing up as withdrawn.
+    if (approval_status === "Accepted") {
+      await pool.query(
+        `UPDATE withdrawals SET withdrawStatus = 'N' WHERE employee_id = ? AND withdrawStatus = 'Y'`,
+        [employee_id],
+      );
+    }
+
     res.json({ message: "Rejoin request updated successfully" });
   } catch (err) {
     console.error(err);

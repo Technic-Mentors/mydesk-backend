@@ -7,9 +7,9 @@ export const withdrawEmployee = async (
 ): Promise<void> => {
   try {
     const id = req.params.id;
-    const { withdrawReason } = req.body;
+    const { withdrawReason, lastWorkingDay } = req.body;
 
-    console.log("Withdraw Request Received:", { id, withdrawReason });
+    console.log("Withdraw Request Received:", { id, withdrawReason, lastWorkingDay });
 
     if (!withdrawReason) {
       res.status(400).json({ message: "Provide all required fields!" });
@@ -27,10 +27,10 @@ export const withdrawEmployee = async (
     }
 
     const insertQuery = `
-      INSERT INTO withdrawals (employee_id, withdrawDate, withdrawReason, withdrawStatus)
-      VALUES (?, CURRENT_DATE, ?, 'Y')
+      INSERT INTO withdrawals (employee_id, withdrawDate, last_working_day, withdrawReason, withdrawStatus, source)
+      VALUES (?, CURRENT_DATE, ?, ?, 'Y', 'withdraw')
     `;
-    await pool.query(insertQuery, [id, withdrawReason]);
+    await pool.query(insertQuery, [id, lastWorkingDay || null, withdrawReason]);
 
     // ✅ Updated to update both fields
     const updateQuery = `
@@ -78,6 +78,9 @@ export const getWithdrawnEmployees = async (
         COALESCE(w.withdrawReason, 'Not provided') AS withdrawReason,
         'Y' AS withdrawStatus,
         COALESCE(w.withdrawDate, DATE(l.updated_at)) AS withdrawDate,
+        w.last_working_day AS lastWorkingDay,
+        COALESCE(w.source, 'withdraw') AS source,
+        COALESCE(w.review_status, 'Pending Review') AS reviewStatus,
         l.name AS name,
         l.email AS email,
         l.contact AS contact,
