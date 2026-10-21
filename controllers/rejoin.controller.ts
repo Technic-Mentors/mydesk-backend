@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import { AuthenticatedRequest } from "../middleware/middleware";
+import { hasPermission, MODULE } from "../permissionModel";
 
 export const getAllRejoinRequests = async (
   req: AuthenticatedRequest,
@@ -184,6 +185,8 @@ export const updateRejoinRequest = async (
 ): Promise<void> => {
   const { id } = req.params;
   const { rejoin_date, note, approval_status } = req.body;
+  const canManage = hasPermission((req as AuthenticatedRequest).user, MODULE.Dynamics);
+  const effectiveStatus = canManage ? approval_status : "Pending";
 
   try {
     const [rejoinRows] = await pool.query(
@@ -246,21 +249,22 @@ export const updateRejoinRequest = async (
       note = ?, 
       approval_status = ? 
       WHERE id = ? AND is_deleted = 0`,
-      [designation, resignation_date, rejoin_date, note, approval_status, id],
+      [designation, resignation_date, rejoin_date, note, effectiveStatus, id],
     );
 
-    const newLoginStatus = approval_status === "Accepted" ? "Y" : "N";
-
-    await pool.query(`UPDATE tbl_users SET loginStatus = ? WHERE id = ?`, [
-      newLoginStatus,
-      employee_id,
-    ]);
+    if (canManage) {
+      const newLoginStatus = effectiveStatus === "Accepted" ? "Y" : "N";
+      await pool.query(`UPDATE tbl_users SET loginStatus = ? WHERE id = ?`, [
+        newLoginStatus,
+        employee_id,
+      ]);
+    }
 
     // A resignation-acceptance now writes a withdrawals row (see
     // resignation.controller.ts) — close it out on rejoin, same as
     // reActiveEmployee already does for the Withdraw-button path, so this
     // person stops showing up as withdrawn.
-    if (approval_status === "Accepted") {
+    if (canManage && effectiveStatus === "Accepted") {
       await pool.query(
         `UPDATE withdrawals SET withdrawStatus = 'N' WHERE employee_id = ? AND withdrawStatus = 'Y'`,
         [employee_id],

@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
+import { employeeNotice, resignationSubmitted } from "../services/employeeNotificationEvents";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
 import { AuthenticatedRequest } from "../middleware/middleware";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
 
@@ -76,7 +78,7 @@ export const addResignation = async (
     return;
   }
 
-  const isAdmin = req.user.role === "admin";
+  const isAdmin = hasPermission(req.user, MODULE.Dynamics);
 
   const [userRows]: any = await pool.query(
     "SELECT name, date FROM tbl_users WHERE id = ?",
@@ -120,44 +122,10 @@ export const addResignation = async (
 
     const resignationId = result.insertId;
 
-    // ✅ CREATE NOTIFICATIONS (never notify the actor themselves)
     try {
-      if (!isAdmin) {
-        // Employee submitted their own resignation → notify all admins
-        const [adminUsers]: any = await pool.query(
-          "SELECT id FROM tbl_users WHERE role = 'admin'"
-        );
-
-        for (const admin of adminUsers) {
-          if (admin.id !== id) {
-            await pool.query(
-              `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-               VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
-              [
-                admin.id,
-                resignationId,
-                `${employeeName} submitted a resignation request`
-              ]
-            );
-          }
-        }
-      } else {
-        // Admin submitted on behalf of the employee → notify that employee
-        if (Number(id) !== req.user.id) {
-          await pool.query(
-            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-             VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
-            [
-              id,
-              resignationId,
-              `A resignation request has been submitted for you`
-            ]
-          );
-        }
-      }
-    } catch (notifError) {
-      console.error("Notification error (non-critical):", notifError);
-    }
+      if (!isAdmin) await resignationSubmitted(Number(id),resignationId,req.user.id);
+      else if (Number(id) !== req.user.id) await employeeNotice(Number(id),"Resignation submitted","A resignation request has been submitted for you.",`resignation:${resignationId}:on-behalf`,true,"/user/dynamics?tab=RESIGNATION");
+    } catch (notifError) { console.error("Resignation notification failed:",notifError); }
 
     res.json({ message: "Resignation added successfully" });
   } catch (error) {
@@ -196,7 +164,7 @@ export const updateResignation = async (
 
     // ✅ STEP 1: Get resignation first (IMPORTANT FIX)
     const [[resignation]]: any = await connection.query(
-      `SELECT employee_id FROM resignation WHERE id = ?`,
+      `SELECT employee_id,approval_status FROM resignation WHERE id = ?`,
       [id],
     );
 
@@ -268,18 +236,12 @@ export const updateResignation = async (
     await connection.commit();
 
     // ✅ Notify employee about approval/rejection decision (admin is the actor here)
-    if (approval_status === "ACCEPTED" || approval_status === "REJECTED") {
+    if ((approval_status === "ACCEPTED" || approval_status === "REJECTED") && approval_status !== resignation.approval_status) {
       try {
         if (employeeId !== req.user.id) {
-          await pool.query(
-            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-             VALUES (?, ?, 'resignation', ?, false, NOW(), NOW())`,
-            [
-              employeeId,
-              id,
-              `Your resignation request has been ${approval_status === "ACCEPTED" ? "Approved" : "Rejected"}`
-            ]
-          );
+          await employeeNotice(employeeId,"Resignation decision",
+            `Your resignation request has been ${approval_status === "ACCEPTED" ? "approved" : "rejected"}.`,
+            `resignation:${id}:decision:${approval_status}`,true,"/user/dynamics?tab=RESIGNATION");
         }
       } catch (notifError) {
         console.error("Notification error (non-critical):", notifError);

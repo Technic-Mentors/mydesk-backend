@@ -1,7 +1,10 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
 import { RowDataPacket } from "mysql2";
 import sanitizeHtml from "sanitize-html";
+import { progressSubmittedEvent } from "../services/projectTodoEvents";
+import { nonCriticalNotification } from "../services/notificationEvents";
 
 const sanitizeNote = (dirty: string) =>
   sanitizeHtml(dirty, {
@@ -16,7 +19,7 @@ const sanitizeNote = (dirty: string) =>
   });
 
 interface AuthenticatedRequest extends Request {
-  user?: { id: number; email: string; role: "admin" | "user" };
+  user?: { id: number; email: string; role: string; permissions?: string[] };
 }
 
 export const getAllProgress = async (req: Request, res: Response) => {
@@ -168,7 +171,7 @@ const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body
   const user = req.user;
   const note = rawNote ? sanitizeNote(rawNote) : rawNote;
 
-  const employee_id = user?.role === "admin" ? bodyEmployeeId : user?.id;
+  const employee_id = hasPermission(user, MODULE.Performance) ? bodyEmployeeId : user?.id;
 
   if (!employee_id || !projectId || !date || !note) {
     res.status(400).json({ message: "Missing required fields" });
@@ -179,7 +182,7 @@ const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body
     let createdByRole: string;
     let finalEmployeeId: number;
 
-    if (user?.role === "admin") {
+    if (hasPermission(user, MODULE.Performance)) {
       if (!bodyEmployeeId) {
         res.status(400).json({ message: "employee_id is required for admin" });
         return;
@@ -220,6 +223,17 @@ const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body
       return;
     }
 
+    if (!hasPermission(user, MODULE.Performance)) {
+      const [assignments]: any = await pool.query(
+        "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y' LIMIT 1",
+        [user?.id, projectId],
+      );
+      if (!assignments.length) {
+        res.status(403).json({ message: "Project is not assigned to you" });
+        return;
+      }
+    }
+
     // Get email for the employee
     const [emailRows]: any = await pool.query(
       "SELECT email FROM tbl_users WHERE id = ?",
@@ -243,11 +257,14 @@ const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body
     }
 
     // Insert with created_by and created_by_role
-    await pool.query(
+    const [inserted]: any = await pool.query(
       `INSERT INTO progress (employee_id, email, projectId, date, note, progressStatus, created_by, created_by_role)
        VALUES (?, ?, ?, ?, ?, 'Y', ?, ?)`,
       [finalEmployeeId, email, projectId, date, note, user?.id, createdByRole],
     );
+    if (createdByRole === "employee") {
+      await nonCriticalNotification(() => progressSubmittedEvent(Number(inserted.insertId), finalEmployeeId));
+    }
 
     res.status(200).json({ 
       message: "Progress Added",
@@ -297,10 +314,15 @@ export const updateProgress = async (
 
     const progress = progressRows[0];
 
+    if (!hasPermission(user, MODULE.Performance) && Number(employee_id) !== user?.id) {
+      res.status(403).json({ message: "You can only edit your own progress" });
+      return;
+    }
+
     // CHECK PERMISSION: Same logic as Todo
     if (progress.created_by_role === 'admin') {
       // Admin-created progress: Only admin can edit
-      if (user?.role !== 'admin') {
+      if (!hasPermission(user, MODULE.Performance)) {
         res.status(403).json({ 
           message: "Access denied. This progress was created by admin and can only be modified by admin." 
         });
@@ -309,7 +331,7 @@ export const updateProgress = async (
     } else {
       // Employee-created progress: Only the creator can edit (or admin)
       // This allows admin to edit employee-created progress (same as Todo)
-      if (user?.role !== 'admin' && user?.id !== progress.created_by) {
+      if (!hasPermission(user, MODULE.Performance) && user?.id !== progress.created_by) {
         res.status(403).json({ 
           message: "Access denied. You can only edit progress you created." 
         });
@@ -337,6 +359,17 @@ export const updateProgress = async (
     if (!projectRows.length) {
       res.status(404).json({ message: "Project not found" });
       return;
+    }
+
+    if (!hasPermission(user, MODULE.Performance)) {
+      const [assignments]: any = await pool.query(
+        "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y' LIMIT 1",
+        [user?.id, projectId],
+      );
+      if (!assignments.length) {
+        res.status(403).json({ message: "Project is not assigned to you" });
+        return;
+      }
     }
 
     // Check for existing progress on same date (excluding current entry)
@@ -419,7 +452,7 @@ export const deleteProgress = async (
     // CHECK PERMISSION: Same logic as Todo
     if (progress.created_by_role === 'admin') {
       // Admin-created progress: Only admin can delete
-      if (user?.role !== 'admin') {
+      if (!hasPermission(user, MODULE.Performance)) {
         res.status(403).json({ 
           message: "Access denied. This progress was created by admin and can only be deleted by admin." 
         });
@@ -428,7 +461,7 @@ export const deleteProgress = async (
     } else {
       // Employee-created progress: Only the creator can delete (or admin)
       // This allows admin to delete employee-created progress (same as Todo)
-      if (user?.role !== 'admin' && user?.id !== progress.created_by) {
+      if (!hasPermission(user, MODULE.Performance) && user?.id !== progress.created_by) {
         res.status(403).json({ 
           message: "Access denied. You can only delete progress you created." 
         });

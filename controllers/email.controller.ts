@@ -1,35 +1,53 @@
 import { Request, Response } from "express";
-import resend from "../utils/resend";
+import { existsSync } from "fs";
+import path from "path";
+import nodemailer from "nodemailer";
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
 
-type Column<T> = {
-  label: string;
-  key: keyof T | ((row: T, index: number) => string);
-};
+type ReportColumn = { label: string; key: string };
+type ReportRow = Record<string, unknown>;
 
-function buildTableRows<T>(data: T[], columns: Column<T>[]): string {
-  return data
-    .map((row, i) => {
-      const cells = columns
-        .map((col) => {
-          let value;
+const escapeHtml = (value: unknown): string =>
+  String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]!);
 
-          if (col.key === "__index") {
-            value = i + 1;
-          } else if (typeof col.key === "function") {
-            value = col.key(row, i);
-          } else {
-            value = row[col.key as keyof T] as any;
-          }
+function buildTableRows(data: ReportRow[], columns: ReportColumn[]): string {
+  return data.map((row, index) => {
+    const cells = columns.map((column) => {
+      const value = column.key === "__index" ? index + 1 : row[column.key];
+      return "<td style=\"border:1px solid #ddd;padding:8px;\">" +
+        escapeHtml(value) + "</td>";
+    }).join("");
+    return "<tr>" + cells + "</tr>";
+  }).join("");
+}
 
-          return `<td style="border:1px solid #ddd;padding:8px;">${value ?? ""}</td>`;
-        })
-        .join("");
+async function reportBrowserPath(): Promise<string> {
+  const configured = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (configured) {
+    if (!existsSync(configured)) throw new Error("Configured report browser does not exist");
+    return configured;
+  }
 
-      return `<tr>${cells}</tr>`;
-    })
-    .join("");
+  if (process.platform === "win32") {
+    const paths = [
+      path.join(process.env.PROGRAMFILES || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(process.env.PROGRAMFILES || "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+    ];
+    const installed = paths.find(existsSync);
+    if (!installed) throw new Error("Chrome or Edge is required to create report PDFs on Windows");
+    return installed;
+  }
+
+  return chromium.executablePath();
 }
 
 export const sendReportEmail = async (
@@ -37,78 +55,85 @@ export const sendReportEmail = async (
   res: Response,
 ): Promise<void> => {
   try {
-    const { email, reportData, business, columns } = req.body;
+    const { email, reportData, business, columns } = req.body as {
+      email?: string;
+      reportData?: ReportRow[];
+      business?: { name?: string };
+      columns?: ReportColumn[];
+    };
 
-    if (!email) {
-      res.status(400).json({ message: "Email is required" });
+    if (!email || !Array.isArray(columns) || columns.length === 0 ||
+        !columns.every((column) => typeof column.label === "string" && typeof column.key === "string") ||
+        !Array.isArray(reportData)) {
+      res.status(400).json({ message: "A recipient, report rows, and columns are required" });
       return;
     }
 
-    if (!columns || columns.length === 0) {
-      res.status(400).json({ message: "Columns are required" });
+    if (!process.env.SMTP_HOST || !process.env.SMTP_FROM_EMAIL) {
+      res.status(503).json({ message: "SMTP is not configured for report email" });
       return;
     }
 
     const rowsHtml = buildTableRows(reportData, columns);
+    const title = escapeHtml(business?.name || "Report");
+    const headers = columns.map((column) => "<th>" + escapeHtml(column.label) + "</th>").join("");
+    const fullHtml = "<!doctype html><html><head><style>" +
+      "body{font-family:Arial,sans-serif;padding:40px}table{width:100%;border-collapse:collapse}" +
+      "th,td{border:1px solid #ddd;padding:8px}th{background:#f4f4f4}" +
+      "</style></head><body><h2>" + title + "</h2><table><thead><tr>" +
+      headers + "</tr></thead><tbody>" + rowsHtml + "</tbody></table></body></html>";
 
-    const fullHtml = `
-      <html>
-        <head>
-          <style>
-            body { font-family: Arial; padding: 40px; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { border: 1px solid #ddd; padding: 8px; }
-            th { background: #f4f4f4; }
-          </style>
-        </head>
-        <body>
-          <h2>${business?.name || "Report"}</h2>
-
-          <table>
-            <thead>
-              <tr>
-                ${columns.map((c: any) => `<th>${c.label}</th>`).join("")}
-              </tr>
-            </thead>
-            <tbody>
-              ${rowsHtml}
-            </tbody>
-          </table>
-        </body>
-      </html>
-    `;
+    const executablePath = await reportBrowserPath();
     const browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath: await chromium.executablePath(),
+      args: process.platform === "win32" ? ["--no-sandbox"] : chromium.args,
+      executablePath,
       headless: true,
     });
-    const page = await browser.newPage();
-    await page.setContent(fullHtml, { waitUntil: "networkidle0" });
-    const pdfUint8 = await page.pdf({ format: "A4", printBackground: true });
-    const pdfBuffer = Buffer.from(pdfUint8);
-    await browser.close();
 
-    const response = await resend.emails.send({
-      from: process.env.FROM_EMAIL!,
-      to: email,
-      subject: `Report - ${new Date().toLocaleDateString()}`,
-      html: `<p>Please find the requested report attached as a PDF.</p>`,
-      attachments: [
-        {
-          filename: "report.pdf",
-          content: pdfBuffer,
-        },
-      ],
+    let pdfBuffer: Buffer;
+    try {
+      const page = await browser.newPage();
+      await page.setContent(fullHtml, { waitUntil: "load" });
+      pdfBuffer = Buffer.from(await page.pdf({ format: "A4", printBackground: true }));
+    } finally {
+      await browser.close();
+    }
+
+    const port = Number(process.env.SMTP_PORT || 587);
+    const transport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port,
+      secure: port === 465,
+      connectionTimeout: 5000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
+      requireTLS: process.env.SMTP_USE_TLS === "true" || process.env.SMTP_USE_TLS === "1",
+      auth: process.env.SMTP_USERNAME
+        ? { user: process.env.SMTP_USERNAME, pass: process.env.SMTP_PASSWORD }
+        : undefined,
     });
 
-    if (response.error) {
-      res.status(400).json({ error: response.error });
-      return;
+    try {
+      await transport.sendMail({
+        from: process.env.SMTP_FROM_EMAIL,
+        to: email,
+        subject: "Report - " + new Date().toLocaleDateString(),
+        html: "<p>Please find the requested report attached as a PDF.</p>",
+        attachments: [{
+          filename: "report.pdf",
+          content: pdfBuffer,
+          contentType: "application/pdf",
+        }],
+      });
+    } finally {
+      transport.close();
     }
 
     res.status(200).json({ message: "Email with PDF sent successfully" });
   } catch (error) {
     console.error("PDF Email Error:", error);
-    res.status(500).json({ message: "Failed to generate or send PDF" });
+    res.status(500).json({
+      message: error instanceof Error ? error.message : "Failed to generate or send PDF",
+    });
   }
 };

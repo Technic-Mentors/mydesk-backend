@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { ensureMobileClockSettings } from "./attendanceMobileSettings.controller";
 
 interface AttendanceRule {
   id?: number;
@@ -15,6 +16,8 @@ interface AttendanceRule {
   officeLatitude?: number | null;
   officeLongitude?: number | null;
   allowedRadius?: number;
+  allowClockIn?: boolean;
+  allowClockOut?: boolean;
 }
 
 export const getAllConfigTime = async (
@@ -69,6 +72,8 @@ export const addConfigTime = async (
       officeLatitude,
       officeLongitude,
       allowedRadius,
+      allowClockIn,
+      allowClockOut,
     } = req.body as AttendanceRule;
 
     if (
@@ -89,21 +94,45 @@ export const addConfigTime = async (
       return;
     }
 
+    if ((allowClockIn !== undefined || allowClockOut !== undefined) &&
+        (typeof allowClockIn !== "boolean" || typeof allowClockOut !== "boolean")) {
+      res.status(400).json({ message: "Both mobile clock settings must be booleans" });
+      return;
+    }
+
     const threshold = shortLeaveThreshold || 120;
     const radius = allowedRadius || 100;
 
-    await pool.query("UPDATE attendance_rules SET status = 'Inactive'");
+    if (allowClockIn !== undefined) await ensureMobileClockSettings();
+    const connection = await pool.getConnection();
+    let result: any;
+    try {
+      await connection.beginTransaction();
+      await connection.query("UPDATE attendance_rules SET status = 'Inactive'");
+      [result] = await connection.query(
+        `INSERT INTO attendance_rules
+         (startTime, endTime, offDay, lateTime, halfLeave, month, year, status, shortLeaveThreshold,
+          officeLatitude, officeLongitude, allowedRadius)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active", threshold,
+          officeLatitude ?? null, officeLongitude ?? null, radius,
+        ],
+      );
 
-    const [result] = await pool.query(
-      `INSERT INTO attendance_rules
-       (startTime, endTime, offDay, lateTime, halfLeave, month, year, status, shortLeaveThreshold,
-        officeLatitude, officeLongitude, allowedRadius)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        startTime, endTime, offDay, lateTime, halfLeave, month, year, "Active", threshold,
-        officeLatitude ?? null, officeLongitude ?? null, radius,
-      ],
-    );
+      if (allowClockIn !== undefined) {
+        await connection.query(
+          "UPDATE attendance_mobile_settings SET allowClockIn = ?, allowClockOut = ? WHERE id = 1",
+          [allowClockIn, allowClockOut]
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
 
     res.status(201).json({
       message: "Attendance rule added successfully",
@@ -134,6 +163,8 @@ export const updateConfigTime = async (
       officeLatitude,
       officeLongitude,
       allowedRadius,
+      allowClockIn,
+      allowClockOut,
     } = req.body as AttendanceRule;
 
     const [existing]: any = await pool.query(
@@ -191,10 +222,20 @@ export const updateConfigTime = async (
       return;
     }
 
+    if ((allowClockIn !== undefined || allowClockOut !== undefined) &&
+        (typeof allowClockIn !== "boolean" || typeof allowClockOut !== "boolean")) {
+      res.status(400).json({ message: "Both mobile clock settings must be booleans" });
+      return;
+    }
+
     const threshold = shortLeaveThreshold || 120;
     const radius = allowedRadius || 100;
 
-    const [result] = await pool.query(
+    if (allowClockIn !== undefined) await ensureMobileClockSettings();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query(
       `UPDATE attendance_rules
        SET startTime = ?,
            endTime = ?,
@@ -224,7 +265,20 @@ export const updateConfigTime = async (
         radius,
         id,
       ],
-    );
+      );
+      if (allowClockIn !== undefined) {
+        await connection.query(
+          "UPDATE attendance_mobile_settings SET allowClockIn = ?, allowClockOut = ? WHERE id = 1",
+          [allowClockIn, allowClockOut]
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
 
     res.json({ message: "Attendance rule updated successfully" });
   } catch (error) {

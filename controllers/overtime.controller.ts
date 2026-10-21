@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { normalizeOvertimeDuration } from "../utils/overtimeDuration";
+import { hasPermission, MODULE } from "../permissionModel";
 
 
 
@@ -37,8 +39,20 @@ export const createOvertime = async (
     const user = (req as any).user;
     const { date, time, description, employee_id, overtime_amount } = req.body;
 
-    const empId = user.role === "admin" ? employee_id : user.id;
+    const empId = hasPermission(user, MODULE.Payroll) ? employee_id : user.id;
 
+    const duration = normalizeOvertimeDuration(time);
+    if (!Number.isInteger(Number(empId)) || Number(empId) <= 0 ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) ||
+        Number.isNaN(Date.parse(String(date) + "T00:00:00Z")) ||
+        !duration ||
+        !String(description || "").trim() ||
+        (hasPermission(user, MODULE.Payroll) &&
+          (!Number.isFinite(Number(overtime_amount)) || Number(overtime_amount) < 0))) {
+      await connection.rollback();
+      res.status(400).json({ message: "Valid employee, date, duration, description, and amount are required" });
+      return;
+    }
     const [existing]: any = await connection.query(
       `SELECT id FROM overtime WHERE employee_id = ? AND date = ?`,
       [empId, date],
@@ -53,11 +67,11 @@ export const createOvertime = async (
     }
 
 
-    const overtimeVal = user.role === "admin" ? Number(overtime_amount) : 0;
+    const overtimeVal = hasPermission(user, MODULE.Payroll) ? Number(overtime_amount) : 0;
 
     await connection.query(
       `INSERT INTO overtime (employee_id, date, time, overtime_amount, description) VALUES (?, ?, ?, ?, ?)`,
-      [empId, date, time, overtimeVal, description],
+      [empId, date, duration, overtimeVal, description],
     );
 
     // ===== Add debit to employee account =====
@@ -72,23 +86,18 @@ export const createOvertime = async (
       const currentBalance = previousBalance + overtimeVal; // debit
 
       // Generate invoiceNo
-      const [seqRows]: any = await connection.query(
-        `SELECT employee_acc_no FROM invoice_sequence WHERE id = 1 FOR UPDATE`,
+      await connection.query(
+        "INSERT INTO invoice_sequence (id, employee_acc_no) VALUES (1, 0) " +
+        "ON DUPLICATE KEY UPDATE id = id",
       );
-
-      let nextNumber = 1;
-      if (seqRows.length) {
-        nextNumber = seqRows[0].employee_acc_no + 1;
-        await connection.query(
-          `UPDATE invoice_sequence SET employee_acc_no = ? WHERE id = 1`,
-          [nextNumber],
-        );
-      } else {
-        await connection.query(
-          `INSERT INTO invoice_sequence (id, employee_acc_no) VALUES (1, 0)`,
-        );
-      }
-
+      const [seqRows]: any = await connection.query(
+        "SELECT employee_acc_no FROM invoice_sequence WHERE id = 1 FOR UPDATE",
+      );
+      const nextNumber = Number(seqRows[0].employee_acc_no ?? 0) + 1;
+      await connection.query(
+        "UPDATE invoice_sequence SET employee_acc_no = ? WHERE id = 1",
+        [nextNumber],
+      );
       const formattedInvoice = `INV-${String(nextNumber).padStart(4, "0")}`;
       const refNo = `REF-${Date.now()}`;
 
@@ -120,3 +129,6 @@ export const createOvertime = async (
     connection.release();
   }
 };
+
+
+

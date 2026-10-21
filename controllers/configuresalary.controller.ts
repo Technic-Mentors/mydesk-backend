@@ -1,13 +1,20 @@
-import { Request, Response } from "express";
+﻿import { Request, Response } from "express";
 import pool from "../database/db";
 
+const validSalaryAmounts = (base: unknown, employeeAllowance: unknown, transport: unknown,
+  medical: unknown, total: unknown): boolean => {
+  const values = [base, employeeAllowance, transport, medical, total].map(Number);
+  return values.every(Number.isFinite) && values[0] > 0 &&
+    values.slice(1).every((value) => value >= 0) &&
+    Math.abs(values[0] + values[1] + values[2] + values[3] - values[4]) < 0.01;
+};
 export const getSalaries = async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query(`
 SELECT
   c.id,
   c.employee_id,
-  e.employee_name,
+  u.name AS employee_name,
   c.salary_amount,
   c.emp_of_mon_allowance,
   c.transport_allowance,
@@ -49,10 +56,10 @@ SELECT
 
 FROM configempsalaries c
 
-LEFT JOIN employee_lifeline e
-  ON c.employee_id = e.employee_id
+LEFT JOIN tbl_users u
+  ON c.employee_id = u.id
 
--- ✅ Attendance Aggregated Separately (FIX DUPLICATION)
+-- âœ… Attendance Aggregated Separately (FIX DUPLICATION)
 LEFT JOIN (
   SELECT
     userId,
@@ -72,12 +79,13 @@ LEFT JOIN (
   AND a.month = MONTH(c.effective_from)
   AND a.year = YEAR(c.effective_from)
 
--- ✅ Loan Aggregated Separately (SAFE CAST)
+-- âœ… Loan Aggregated Separately (SAFE CAST)
 LEFT JOIN (
   SELECT
     employee_id,
-    SUM(CAST(IFNULL(deduction, 0) AS DECIMAL(10,2))) AS total_loan_deduction
+    SUM(LEAST(CAST(IFNULL(deduction, 0) AS DECIMAL(10,2)), CAST(IFNULL(remainingAmount, 0) AS DECIMAL(10,2)))) AS total_loan_deduction
   FROM loan
+  WHERE remainingAmount > 0 AND applyDate <= CURRENT_DATE()
   GROUP BY employee_id
 ) l
   ON l.employee_id = c.employee_id
@@ -95,7 +103,6 @@ ORDER BY c.config_date DESC
     console.error("FULL SQL ERROR:", error);
     res.status(500).json({
       message: "Error fetching salaries",
-      error: error.sqlMessage || error.message,
     });
   }
 };
@@ -111,8 +118,9 @@ export const getSalaryById = async (
       [id],
     );
 
-    if ((rows as any).length === 0)
-      res.status(404).json({ message: "Salary not found" });
+    if ((rows as any).length === 0) {
+      res.status(404).json({ message: "Salary not found" }); return;
+    }
 
     res.json((rows as any)[0]);
   } catch (error) {
@@ -137,6 +145,15 @@ export const addSalary = async (req: Request, res: Response): Promise<void> => {
       description = "",
     } = req.body;
 
+    if (!Number.isInteger(Number(employee_id)) || Number(employee_id) <= 0 ||
+        !/^\d{4}-\d{2}$/.test(String(salary_month || "")) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(config_date || "")) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(effective_from || "")) ||
+        !validSalaryAmounts(salary_amount, emp_of_mon_allowance, transport_allowance,
+          medical_allowance, total_salary)) {
+      res.status(400).json({ message: "Valid employee, dates, and salary amounts are required; total must equal base plus allowances" });
+      return;
+    }
     const [existing]: any = await pool.query(
       `SELECT id FROM configempsalaries
    WHERE employee_id = ?
@@ -244,6 +261,15 @@ export const updateSalary = async (
       description,
     } = req.body;
 
+    if (!Number.isInteger(Number(employee_id)) || Number(employee_id) <= 0 ||
+        !/^\d{4}-\d{2}$/.test(String(salary_month || "")) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(config_date || "")) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(effective_from || "")) ||
+        !validSalaryAmounts(salary_amount, emp_of_mon_allowance, transport_allowance,
+          medical_allowance, total_salary)) {
+      res.status(400).json({ message: "Valid employee, dates, and salary amounts are required; total must equal base plus allowances" });
+      return;
+    }
     const [existing]: any = await pool.query(
       `SELECT id FROM configempsalaries
    WHERE employee_id = ?

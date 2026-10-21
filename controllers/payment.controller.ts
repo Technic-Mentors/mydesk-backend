@@ -9,6 +9,7 @@ export const getPayments = async (req: Request, res: Response) => {
     p.customerId,
     c.customerName,
     p.amount,
+    p.paymentStatus,
     p.paymentMethod,
     p.description,
     p.date

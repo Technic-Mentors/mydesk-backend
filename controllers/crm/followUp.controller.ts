@@ -2,6 +2,7 @@ import { Response } from "express";
 import pool from "../../database/db";
 import { AuthenticatedRequest } from "../../middleware/middleware";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
+import { wasFollowUpDismissedToday } from "../../services/notificationService";
 
 
 // ============================================
@@ -61,7 +62,7 @@ export const checkAndCreateFollowUpNotifications = async (req: AuthenticatedRequ
         [followUp.id, userId]
       );
 
-      if (existing.length === 0) {
+      if (existing.length === 0 && !(await wasFollowUpDismissedToday(userId, followUp.id))) {
         const message = `📅 Follow-up today: ${followUp.lead_name || 'Lead'} - ${followUp.follow_up_type} at ${followUp.follow_up_time}`;
         await pool.query(
           `INSERT INTO notifications 
@@ -82,7 +83,7 @@ export const checkAndCreateFollowUpNotifications = async (req: AuthenticatedRequ
         [followUp.id, userId]
       );
 
-      if (existing.length === 0) {
+      if (existing.length === 0 && !(await wasFollowUpDismissedToday(userId, followUp.id))) {
         const message = `⚠️ OVERDUE Follow-up: ${followUp.lead_name || 'Lead'} - Due on ${new Date(followUp.follow_up_date).toLocaleDateString()}`;
         await pool.query(
           `INSERT INTO notifications 
@@ -224,7 +225,7 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
         [followUp.id, userId]
       );
 
-      if (existing.length === 0) {
+      if (existing.length === 0 && !(await wasFollowUpDismissedToday(userId, followUp.id))) {
         const message = `📅 Follow-up today: ${followUp.lead_name || 'Lead'} - ${followUp.follow_up_type} at ${followUp.follow_up_time}`;
         await pool.query(
           `INSERT INTO notifications 
@@ -243,7 +244,7 @@ export const createFollowUpNotifications = async (req: AuthenticatedRequest, res
         [followUp.id, userId]
       );
 
-      if (existing.length === 0) {
+      if (existing.length === 0 && !(await wasFollowUpDismissedToday(userId, followUp.id))) {
         const message = `⚠️ OVERDUE Follow-up: ${followUp.lead_name || 'Lead'} - Due on ${new Date(followUp.follow_up_date).toLocaleDateString()}`;
         await pool.query(
           `INSERT INTO notifications 

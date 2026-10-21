@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+﻿import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
 
@@ -35,10 +35,10 @@ export const createOvertimeConfig = async (
   try {
     const { overtimeType, amount } = req.body;
 
-    if (!overtimeType || !amount) {
+    if (!String(overtimeType || "").trim() || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       res.status(400).json({
         success: false,
-        message: "All fields are required",
+        message: "Overtime type and a positive rate are required",
       });
       return;
     }
@@ -86,10 +86,10 @@ export const updateOvertimeConfig = async (
     const { id } = req.params;
     const { overtimeType, amount } = req.body;
 
-    if (!overtimeType || !amount) {
+    if (!String(overtimeType || "").trim() || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       res.status(400).json({
         success: false,
-        message: "All fields are required",
+        message: "Overtime type and a positive rate are required",
       });
       return;
     }
@@ -150,3 +150,4 @@ export const deleteOvertimeConfig = async (
     return;
   }
 };
+

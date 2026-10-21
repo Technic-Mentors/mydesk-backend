@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import moment from "moment-timezone";
+import { decisionEvent, nonCriticalNotification, wfhRequested } from "../services/notificationEvents";
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -291,36 +292,7 @@ export const requestWFH = async (req: Request, res: Response): Promise<void> => 
 
         const requestId = (result as any).insertId;
 
-        // ✅ NEW: notify all admins (except if the requester is themselves an admin)
-        try {
-            const [userRows]: any = await pool.query(
-                "SELECT name FROM tbl_users WHERE id = ?",
-                [userId]
-            );
-            const employeeName = userRows[0]?.name || "Employee";
-
-            const [adminUsers]: any = await pool.query(
-                "SELECT id FROM tbl_users WHERE role = 'admin'"
-            );
-
-            for (const admin of adminUsers) {
-                if (admin.id !== Number(userId)) {
-                    await pool.query(
-                        `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                         VALUES (?, ?, 'remote', ?, false, ?, ?)`,
-                        [
-                            admin.id,
-                            requestId,
-                            `${employeeName} requested Remote work: ${fromDate} to ${toDate}`,
-                            utcTime,
-                            utcTime
-                        ]
-                    );
-                }
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
-        }
+        await nonCriticalNotification(() => wfhRequested(Number(userId), Number(requestId), fromDate, toDate, reason));
 
         res.status(201).json({
             success: true,
@@ -556,6 +528,30 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
             return;
         }
 
+        const pending = request[0];
+        if (!pending.remoteFromDate || !pending.remoteToDate || pending.remoteFromDate > pending.remoteToDate) {
+            res.status(400).json({ message: "Remote work dates are invalid" });
+            return;
+        }
+        const [approvedLeaves]: any = await pool.query(
+            "SELECT id FROM leaves WHERE userId=? AND status='Y' AND leaveStatus='Approved' " +
+            "AND fromDate<=? AND toDate>=? LIMIT 1",
+            [pending.userId, pending.remoteToDate, pending.remoteFromDate],
+        );
+        if (approvedLeaves.length) {
+            res.status(409).json({ message: "Employee has approved leave during these dates. Cannot approve Remote work." });
+            return;
+        }
+        const [markedAttendance]: any = await pool.query(
+            "SELECT id FROM attendance WHERE userId=? AND id<>? AND date BETWEEN ? AND ? " +
+            "AND status='Y' AND clockIn IS NOT NULL LIMIT 1",
+            [pending.userId, requestId, pending.remoteFromDate, pending.remoteToDate],
+        );
+        if (markedAttendance.length) {
+            res.status(409).json({ message: "Employee has already marked attendance during these dates. Cannot approve Remote work." });
+            return;
+        }
+
         await pool.query(
             `UPDATE attendance 
              SET remoteStatus = 'Approved', 
@@ -567,19 +563,7 @@ export const approveWFHRequest = async (req: Request, res: Response): Promise<vo
             [adminId, utcTime, utcTime, requestId]
         );
 
-        // ✅ NEW: notify the employee
-        try {
-            const empId = request[0].userId;
-            if (empId !== Number(adminId)) {
-                await pool.query(
-                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
-                    [empId, requestId, `Your Remote work request has been Approved`, utcTime, utcTime]
-                );
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
-        }
+        await nonCriticalNotification(() => decisionEvent("remote", Number(request[0].userId), Number(requestId), "Approved"));
 
         res.status(200).json({
             success: true,
@@ -598,6 +582,10 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
     try {
         const { requestId } = req.params;
         const { rejectedReason } = req.body;
+        if (!String(rejectedReason || "").trim()) {
+            res.status(400).json({ message: "Please provide a reason for rejection" });
+            return;
+        }
         const adminId = req.body.adminId || 1;
         const utcTime = getUTCTime();
 
@@ -625,19 +613,7 @@ export const rejectWFHRequest = async (req: Request, res: Response): Promise<voi
             [adminId, utcTime, rejectedReason || null, utcTime, requestId]
         );
 
-        // ✅ NEW: notify the employee
-        try {
-            const empId = request[0].userId;
-            if (empId !== Number(adminId)) {
-                await pool.query(
-                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
-                    [empId, requestId, `Your Remote work request has been Rejected${rejectedReason ? `: ${rejectedReason}` : ''}`, utcTime, utcTime]
-                );
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
-        }
+        await nonCriticalNotification(() => decisionEvent("remote", Number(request[0].userId), Number(requestId), "Rejected", rejectedReason));
 
         res.status(200).json({
             success: true,
@@ -769,17 +745,8 @@ export const adminAddWFHRequest = async (req: Request, res: Response): Promise<v
 
         const requestId = (result as any).insertId;
 
-        // ✅ NEW: notify the employee
-        try {
-            if (Number(userId) !== Number(approvedBy)) {
-                await pool.query(
-                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'remote', ?, false, ?, ?)`,
-                    [userId, requestId, `A Remote work request (${fromDate} to ${toDate}) has been added and approved for you`, utcTime, utcTime]
-                );
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
+        if (Number(userId) !== Number(approvedBy)) {
+            await nonCriticalNotification(() => decisionEvent("remote", Number(userId), Number(requestId), "Approved"));
         }
 
         res.status(201).json({

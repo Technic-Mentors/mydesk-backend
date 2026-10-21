@@ -1,6 +1,60 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
+import { promotionPositionOptions } from "../utils/promotionPositions";
+import { promotionDecisionNotice } from "../services/employeeNotificationEvents";
 import { AuthenticatedRequest } from "../middleware/middleware";
+
+export const getPromotionPositions = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    const employeeId = hasPermission(req.user, MODULE.Dynamics) ? Number(req.query.employeeId) : req.user.id;
+    if (!Number.isInteger(Number(employeeId)) || Number(employeeId) <= 0) {
+      res.status(400).json({ message: "Select an employee first" });
+      return;
+    }
+
+    const [users]: any = await pool.query(
+      "SELECT role, roleId FROM tbl_users WHERE id = ? LIMIT 1",
+      [employeeId]
+    );
+    if (!users.length) {
+      res.status(404).json({ message: "Employee not found" });
+      return;
+    }
+
+    const [currentRows]: any = await pool.query(
+      `SELECT position FROM employee_lifeline WHERE employee_id = ?
+       ORDER BY date DESC, id DESC LIMIT 1`,
+      [employeeId]
+    );
+    const currentPosition = String(currentRows[0]?.position || "").trim();
+    const [positionRows]: any = await pool.query(
+      `SELECT DISTINCT TRIM(el.position) AS title
+       FROM employee_lifeline el JOIN tbl_users u ON u.id = el.employee_id
+       WHERE u.role = ? AND u.roleId <=> ? AND u.loginStatus = 'Y'
+         AND u.status IN ('Active', 'Y')
+         AND el.position IS NOT NULL AND TRIM(el.position) != ''`,
+      [users[0].role, users[0].roleId]
+    );
+    const [jobRows]: any = await pool.query(
+      "SELECT job_title AS title FROM jobs WHERE status = 'Y' AND TRIM(job_title) != ''"
+    );
+    const titles = [...positionRows, ...jobRows].map((row: any) => String(row.title));
+    const positions = promotionPositionOptions(currentPosition, titles);
+
+    res.json({
+      currentPosition,
+      positions: positions.map((title) => ({ value: title, label: title })),
+    });
+  } catch (error) {
+    console.error("Promotion Positions Error:", error);
+    res.status(500).json({ message: "Failed to load promotion positions" });
+  }
+};
 
 export const getAllPromotions = async (_: Request, res: Response) => {
   try {
@@ -90,8 +144,8 @@ export const addPromotion = async (
     }
 
     const { id, current_designation, requested_designation, note } = req.body;
-    const employee_id = req.user.role === "admin" ? id : req.user.id;
-    const isAdmin = req.user.role === "admin";
+    const employee_id = hasPermission(req.user, MODULE.Dynamics) ? id : req.user.id;
+    const isAdmin = hasPermission(req.user, MODULE.Dynamics);
 
     // Set date to today's date automatically
     const today = new Date().toISOString().split('T')[0];
@@ -232,8 +286,9 @@ export const updatePromotion = async (
       return;
     }
 
-    if (req.user.role !== "admin") {
-      res.status(403).json({ message: "Only admin can approve promotions" });
+    const canManage = hasPermission(req.user, MODULE.Dynamics);
+    if (!canManage && existing[0].employee_id !== req.user.id) {
+      res.status(403).json({ message: "Forbidden" });
       return;
     }
 
@@ -257,12 +312,12 @@ export const updatePromotion = async (
         requested_designation,
         note,
         date,
-        approval,
+        canManage ? approval : "PENDING",
         promotionId,
       ],
     );
 
-    if (approval === "ACCEPTED") {
+    if (canManage && approval === "ACCEPTED") {
       const promotion = existing[0];
       const empId = promotion.employee_id;
 
@@ -303,23 +358,16 @@ export const updatePromotion = async (
       }
     }
 
-    // ✅ Notify employee about approval/rejection decision (admin is the actor, so employee gets notified, not admin)
-    if (approval === "ACCEPTED" || approval === "REJECTED") {
+    if (canManage && (approval === "ACCEPTED" || approval === "REJECTED") &&
+        existing[0].approval !== approval && Number(existing[0].employee_id) !== req.user.id) {
+      const approved = approval === "ACCEPTED";
+      const message = approved
+        ? `Congratulations! Your designation has been updated from ${current_designation} to ${requested_designation}, effective ${date}.`
+        : `Your promotion request from ${current_designation} to ${requested_designation} was rejected.`;
       try {
-        const empId = existing[0].employee_id;
-        if (empId !== req.user.id) {
-          await pool.query(
-            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-             VALUES (?, ?, 'promotion', ?, false, NOW(), NOW())`,
-            [
-              empId,
-              promotionId,
-              `Your promotion request (${requested_designation}) has been ${approval === "ACCEPTED" ? "Approved" : "Rejected"}`
-            ]
-          );
-        }
+        await promotionDecisionNotice(Number(existing[0].employee_id), Number(promotionId), approved, message);
       } catch (notifError) {
-        console.error("Notification error (non-critical):", notifError);
+        console.error("Promotion notification failed:", notifError);
       }
     }
 
@@ -352,7 +400,7 @@ export const deletePromotion = async (
       return;
     }
 
-    if (req.user.role !== "admin" && existing[0].employee_id !== req.user.id) {
+    if (!hasPermission(req.user, MODULE.Dynamics) && existing[0].employee_id !== req.user.id) {
       res.status(403).json({ message: "Unauthorized" });
       return;
     }

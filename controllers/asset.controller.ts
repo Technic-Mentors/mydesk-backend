@@ -4,7 +4,7 @@ import pool from "../database/db";
 export const getAssets = async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query(
-      `SELECT a.id, a.asset_name, a.category_id, a.description, a.date, c.category_name
+      `SELECT a.id, a.asset_name, a.category_id, a.description, a.date, a.status, c.category_name
        FROM assets a
        JOIN asset_categories c ON a.category_id = c.id
        WHERE a.status = 'Y'`, // Only fetch active assets

@@ -1,3 +1,4 @@
+import { leadStatusPrecondition } from "../../services/leadStatusPreconditions";
 import { Response } from "express";
 import pool from "../../database/db";
 import { AuthenticatedRequest } from "../../middleware/middleware";
@@ -203,6 +204,11 @@ export const updateLeadStatusFromPipeline = async (
 
     const oldStatus = currentLead[0].lead_status;
     const leadData = currentLead[0];
+    const preconditionError = leadStatusPrecondition(leadData, lead_status);
+    if (preconditionError) {
+      res.status(400).json({ message: preconditionError });
+      return;
+    }
 
     // ✅ Update lead status
     await pool.query("UPDATE leads SET lead_status = ? WHERE id = ?", [
@@ -358,6 +364,11 @@ export const dragDropLead = async (
 
     const oldStatus = currentLead[0].lead_status;
     const leadData = currentLead[0];
+    const preconditionError = leadStatusPrecondition(leadData, target_stage);
+    if (preconditionError) {
+      res.status(400).json({ message: preconditionError });
+      return;
+    }
 
     // ✅ Update lead status
     await pool.query("UPDATE leads SET lead_status = ? WHERE id = ?", [
@@ -490,6 +501,15 @@ export const updateLeadDealValue = async (
     }
 
     // ✅ Update deal value
+    const formError = leadStatusPrecondition(
+      { ...currentLead[0], deal_value: deal_value ?? currentLead[0].deal_value, probability: probability ?? currentLead[0].probability, expected_close_date: expected_close_date ?? currentLead[0].expected_close_date },
+      currentLead[0].lead_status,
+    );
+    if (formError) {
+      res.status(400).json({ message: formError });
+      return;
+    }
+
     await pool.query(
       `UPDATE leads 
        SET deal_value = COALESCE(?, deal_value),

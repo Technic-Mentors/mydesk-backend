@@ -31,23 +31,18 @@ export const addEmployeeAccount = async (
   try {
     await connection.beginTransaction();
 
-    const [rows]: any = await connection.query(
-      `SELECT employee_acc_no FROM invoice_sequence WHERE id = 1 FOR UPDATE`,
+    await connection.query(
+      "INSERT INTO invoice_sequence (id, employee_acc_no) VALUES (1, 0) " +
+      "ON DUPLICATE KEY UPDATE id = id",
     );
-
-    let nextNumber = 1;
-    if (rows.length > 0) {
-      nextNumber = rows[0].employee_acc_no + 1;
-      await connection.query(
-        `UPDATE invoice_sequence SET employee_acc_no = ? WHERE id = 1`,
-        [nextNumber],
-      );
-    } else {
-      await connection.query(
-        `INSERT INTO invoice_sequence (id, employee_acc_no) VALUES (1, 0)`,
-      );
-    }
-
+    const [rows]: any = await connection.query(
+      "SELECT employee_acc_no FROM invoice_sequence WHERE id = 1 FOR UPDATE",
+    );
+    const nextNumber = Number(rows[0].employee_acc_no ?? 0) + 1;
+    await connection.query(
+      "UPDATE invoice_sequence SET employee_acc_no = ? WHERE id = 1",
+      [nextNumber],
+    );
     const formattedInvoice = `INV-${String(nextNumber).padStart(4, "0")}`;
     const [last]: any = await connection.query(
       `SELECT balance FROM employee_accounts 

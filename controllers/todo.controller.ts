@@ -1,6 +1,10 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
+import { createHash } from "node:crypto";
+import { todoAssignmentEvent, todoDueDateEvent, todoStatusEvent } from "../services/projectTodoEvents";
+import { nonCriticalNotification } from "../services/notificationEvents";
 
 const normalizeDate = (date: string | null | undefined) => {
   if (!date) return null;
@@ -146,7 +150,7 @@ export const addTodo = async (
     let finalEmployeeId: number;
     let createdByRole: string;
     
-    if (user?.role === "admin") {
+    if (hasPermission(user, MODULE.Performance)) {
       if (!employee_id) {
         res.status(400).json({ message: "employee_id is required for admin" });
         return;
@@ -159,9 +163,18 @@ export const addTodo = async (
     }
 
     const connection = await pool.getConnection();
+    const lockName = `todo-create:${createHash("sha256").update(`${finalEmployeeId}:${task}:${normalizeDate(startDate)}:${normalizeDate(endDate)}`).digest("hex").slice(0,40)}`;
+    let lockAcquired = false;
 
     try {
       await connection.beginTransaction();
+      const [locks]: any = await connection.query("SELECT GET_LOCK(?,5) AS acquired",[lockName]);
+      if (locks[0]?.acquired !== 1) {
+        await connection.rollback();
+        res.status(409).json({ message:"Todo creation is being processed" });
+        return;
+      }
+      lockAcquired = true;
 
       // Check if user exists
       const [userRows]: any = await connection.query(
@@ -209,7 +222,7 @@ export const addTodo = async (
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
-      await connection.query(query, [
+      const [inserted] = await connection.query<ResultSetHeader>(query, [
         finalEmployeeId,
         task,
         note ?? "",
@@ -223,6 +236,7 @@ export const addTodo = async (
       ]);
 
       await connection.commit();
+      await nonCriticalNotification(() => todoAssignmentEvent(inserted.insertId,finalEmployeeId,user?.id));
       res.status(201).json({
         message: "Todo added successfully",
         data: {
@@ -234,7 +248,8 @@ export const addTodo = async (
       await connection.rollback();
       throw error;
     } finally {
-      connection.release();
+      try { if (lockAcquired) await connection.query("SELECT RELEASE_LOCK(?)",[lockName]); }
+      finally { connection.release(); }
     }
   } catch (error) {
     console.error(error);
@@ -274,7 +289,7 @@ export const updateTodo = async (
 
     // FIRST: Get the todo to check who created it
     const [todoRows]: any = await pool.query(
-      "SELECT created_by, created_by_role FROM todo WHERE id = ?",
+      "SELECT created_by, created_by_role, employee_id, task, completionStatus, deadline FROM todo WHERE id = ?",
       [id]
     );
 
@@ -285,10 +300,15 @@ export const updateTodo = async (
 
     const todo = todoRows[0];
 
+    if (!hasPermission(user, MODULE.Performance) && Number(employee_id) !== user?.id) {
+      res.status(403).json({ message: "You can only edit your own todo" });
+      return;
+    }
+
     // CHECK PERMISSION: Can this user edit this todo?
     if (todo.created_by_role === 'admin') {
       // Admin-created todo: Only admin can edit
-      if (user?.role !== 'admin') {
+      if (!hasPermission(user, MODULE.Performance)) {
         res.status(403).json({ 
           message: "Access denied. This todo was created by admin and can only be modified by admin." 
         });
@@ -296,7 +316,7 @@ export const updateTodo = async (
       }
     } else {
       // Employee-created todo: Only the creator can edit (or admin)
-      if (user?.role !== 'admin' && user?.id !== todo.created_by) {
+      if (!hasPermission(user, MODULE.Performance) && user?.id !== todo.created_by) {
         res.status(403).json({ 
           message: "Access denied. You can only edit todos you created." 
         });
@@ -409,6 +429,18 @@ export const updateTodo = async (
       return;
     }
 
+    if (Number(todo.employee_id) !== Number(employee_id)) {
+      await nonCriticalNotification(() => todoAssignmentEvent(Number(id),Number(employee_id),user?.id));
+    }
+    const finalStatus = completionStatus || "Defer";
+    if (todo.completionStatus !== finalStatus) {
+      await nonCriticalNotification(() => todoStatusEvent(Number(id),todo.completionStatus,finalStatus,user?.id));
+    }
+    const previousDeadline = normalizeDate(todo.deadline);
+    if (previousDeadline && previousDeadline !== normalizedDeadline) {
+      await nonCriticalNotification(() => todoDueDateEvent(Number(id),previousDeadline,normalizedDeadline,Number(employee_id),user?.id));
+    }
+
     res.status(200).json({ 
       message: "Todo updated successfully",
       data: {
@@ -419,6 +451,62 @@ export const updateTodo = async (
   } catch (error) {
     console.error("Update Todo Error:", error);
     res.status(500).json({ message: "Failed to update todo" });
+  }
+};
+
+export const updateTodoStatus = async (req: RequestWithUser, res: Response): Promise<void> => {
+  try {
+    const id = Number(req.params.id);
+    const { completionStatus } = req.body;
+    if (!Number.isInteger(id) || id <= 0 || !["Pending", "Completed"].includes(completionStatus)) {
+      res.status(400).json({ message: "A valid Todo ID and status are required" });
+      return;
+    }
+
+    const [rows]: any = await pool.query(
+      "SELECT created_by, created_by_role, employee_id, completionStatus, startDate, endDate FROM todo WHERE id = ? AND todoStatus = 'Y'",
+      [id],
+    );
+    if (!rows.length) {
+      res.status(404).json({ message: "Todo not found" });
+      return;
+    }
+
+    const todo = rows[0];
+    const user = req.user;
+    const canManage = hasPermission(user, MODULE.Performance);
+    if (!canManage && (
+      todo.created_by_role === "admin" ||
+      Number(todo.created_by) !== user?.id ||
+      Number(todo.employee_id) !== user?.id
+    )) {
+      res.status(403).json({ message: "You cannot edit this Todo" });
+      return;
+    }
+
+    const start = normalizeDate(todo.startDate);
+    const end = normalizeDate(todo.endDate);
+    if (!start || !end) {
+      res.status(400).json({ message: "Todo dates are invalid" });
+      return;
+    }
+    const [approvedLeaves]: any = await pool.query(
+      "SELECT id FROM leaves WHERE userId=? AND status='Y' AND leaveStatus='Approved' " +
+      "AND fromDate<=? AND toDate>=? LIMIT 1",
+      [todo.employee_id, end, start],
+    );
+    if (approvedLeaves.length) {
+      res.status(400).json({ message: "Cannot update todo. User has approved leave on one or more selected dates." });
+      return;
+    }
+    if (todo.completionStatus !== completionStatus) {
+      await pool.query("UPDATE todo SET completionStatus = ? WHERE id = ?", [completionStatus, id]);
+      await nonCriticalNotification(() => todoStatusEvent(id, todo.completionStatus, completionStatus, user?.id));
+    }
+    res.status(200).json({ message: "Todo status updated successfully", completionStatus });
+  } catch (error) {
+    console.error("Update Todo Status Error:", error);
+    res.status(500).json({ message: "Failed to update Todo status" });
   }
 };
 
@@ -451,7 +539,7 @@ export const deleteTodo = async (
     // CHECK PERMISSION: Can this user delete this todo?
     if (todo.created_by_role === 'admin') {
       // Admin-created todo: Only admin can delete
-      if (user?.role !== 'admin') {
+      if (!hasPermission(user, MODULE.Performance)) {
         res.status(403).json({ 
           message: "Access denied. This todo was created by admin and can only be deleted by admin." 
         });
@@ -459,7 +547,7 @@ export const deleteTodo = async (
       }
     } else {
       // Employee-created todo: Only the creator can delete (or admin)
-      if (user?.role !== 'admin' && user?.id !== todo.created_by) {
+      if (!hasPermission(user, MODULE.Performance) && user?.id !== todo.created_by) {
         res.status(403).json({ 
           message: "Access denied. You can only delete todos you created." 
         });

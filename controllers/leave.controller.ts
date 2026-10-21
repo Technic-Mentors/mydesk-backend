@@ -1,8 +1,10 @@
 import { Request as ExpressRequest, Response } from "express";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
 import { OkPacket, RowDataPacket } from "mysql2";
 import { AuthenticatedRequest } from "../middleware/middleware";
 import moment from "moment-timezone";
+import { decisionEvent, leaveRequested, nonCriticalNotification } from "../services/notificationEvents";
 
 // ============================================================
 // LEAVE TYPE CONSTANTS
@@ -537,7 +539,7 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
         // ✅ CHECK USER
         // ============================================================
         let userId: number;
-        const isAdmin = req.user.role?.toLowerCase() === "admin";
+        const isAdmin = hasPermission(req.user, MODULE.Attendance);
 
         if (isAdmin) {
             if (!employee_id) {
@@ -653,40 +655,10 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
         // ============================================================
         // ✅ SEND NOTIFICATIONS
         // ============================================================
-        try {
-            if (!isAdmin) {
-                const [adminUsers] = await pool.query<RowDataPacket[]>(
-                    "SELECT id FROM tbl_users WHERE role = 'admin' AND status = 'Y'"
-                );
-
-                for (const admin of adminUsers) {
-                    if (admin.id !== userId) {
-                        await pool.query(
-                            `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                             VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
-                            [
-                                admin.id,
-                                leaveId,
-                                `${employeeName} applied for ${leaveTypeValue} leave: ${fromDate} to ${toDate}`
-                            ]
-                        );
-                    }
-                }
-            } else {
-                if (userId !== req.user.id) {
-                    await pool.query(
-                        `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                         VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
-                        [
-                            userId,
-                            leaveId,
-                            `Your ${leaveTypeValue} leave request has been Approved by admin`
-                        ]
-                    );
-                }
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
+        if (!isAdmin) {
+            await nonCriticalNotification(() => leaveRequested(Number(userId), Number(leaveId), leaveTypeValue, fromDate, toDate));
+        } else if (Number(userId) !== req.user.id) {
+            await nonCriticalNotification(() => decisionEvent("leave", Number(userId), Number(leaveId), "Approved"));
         }
 
         return res.status(201).json({
@@ -722,6 +694,11 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
             toTime,
             leaveStatus
         } = req.body;
+
+        const previousStatusRows = leaveStatus === "Approved" || leaveStatus === "Rejected"
+            ? await pool.execute<RowDataPacket[]>("SELECT userId, leaveStatus FROM leaves WHERE id = ? AND status = 'Y'", [id])
+            : null;
+        const previousLeave = previousStatusRows?.[0]?.[0];
 
         const updateFields: string[] = [];
         const values: any[] = [];
@@ -768,6 +745,13 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
             });
         }
 
+        if (leaveStatus === "Approved") {
+            const [currentRows]: any = await pool.query("SELECT * FROM leaves WHERE id=? AND status='Y'", [id]);
+            if (!currentRows.length) return res.status(404).json({ success: false, message: "Leave not found" });
+            const approvalError = await leaveApprovalError({ ...currentRows[0], ...req.body });
+            if (approvalError) return res.status(400).json({ success: false, message: approvalError });
+        }
+
         values.push(id);
 
         const query = `
@@ -792,6 +776,10 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
 
         const updatedLeave = (updatedRows as any[])[0];
 
+        if (previousLeave && previousLeave.leaveStatus !== leaveStatus) {
+            await nonCriticalNotification(() => decisionEvent("leave", Number(updatedLeave.userId), Number(id), leaveStatus));
+        }
+
         res.status(200).json({
             success: true,
             message: 'Leave updated successfully',
@@ -807,6 +795,31 @@ export const updateLeave = async (req: ExpressRequest, res: Response) => {
     }
 };
 // ============================================================
+// Apply the same leave approval rules in the edit form and quick decision.
+const leaveApprovalError = async (leave: any): Promise<string | null> => {
+    if (!leave.fromDate || !leave.toDate)
+        return "Leave dates are required before approval.";
+    const fromDate = moment(leave.fromDate).format("YYYY-MM-DD");
+    const toDate = moment(leave.toDate).format("YYYY-MM-DD");
+    const leaveType = String(leave.leaveType || leave.leaveSubject || "").toUpperCase();
+    if (!leaveType || !leave.leaveReason || !fromDate || !toDate || fromDate > toDate)
+        return "Complete the leave type, reason, and valid dates before approval.";
+    if (["SHORT LEAVE", "HALF DAY"].includes(leaveType) && fromDate !== toDate)
+        return `${leaveType} must be for a single day.`;
+    if (leaveType === "SHORT LEAVE" && (!leave.fromTime || !leave.toTime || leave.fromTime >= leave.toTime))
+        return "Valid From Time and To Time are required for Short Leave.";
+    if (!["SHORT LEAVE", "HALF DAY"].includes(leaveType)) {
+        const [attendance]: any = await pool.query(
+            "SELECT id FROM attendance WHERE userId=? AND date BETWEEN ? AND ? " +
+            "AND status='Y' AND clockIn IS NOT NULL LIMIT 1",
+            [leave.userId, fromDate, toDate],
+        );
+        if (attendance.length)
+            return "Attendance is already marked in this leave period. Remove attendance or use Short Leave/Half Day.";
+    }
+    return null;
+};
+
 // UPDATE MY LEAVE (Employee) - New Route
 // ============================================================
 export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) => {
@@ -1049,6 +1062,14 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
         }
 
         // ✅ FIXED: Only update leaveStatus
+        if (leaveStatus === "Approved") {
+            const approvalError = await leaveApprovalError(existingRows[0]);
+            if (approvalError) return res.status(400).json({ success: false, message: approvalError });
+        }
+        if (leaveStatus === "Rejected" && !String(rejectedReason || "").trim()) {
+            return res.status(400).json({ success: false, message: "Please provide a reason for rejection" });
+        }
+
         const [result]: any[] = await pool.execute(
             `UPDATE leaves SET leaveStatus = ? WHERE id = ?`,
             [leaveStatus, id]
@@ -1066,28 +1087,8 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
             [id]
         );
 
-        try {
-            const leave = updatedRows[0];
-            const empId = leave.userId;
-            const adminId = req.user.id;
-
-            if (empId !== adminId) {
-                const statusMessage = leaveStatus === 'Approved' 
-                    ? 'Approved' 
-                    : `Rejected${rejectedReason ? `: ${rejectedReason}` : ''}`;
-                
-                await pool.query(
-                    `INSERT INTO notifications (userId, referenceId, type, message, isRead, createdAt, updatedAt)
-                     VALUES (?, ?, 'leave', ?, false, NOW(), NOW())`,
-                    [
-                        empId,
-                        id,
-                        `Your ${leave.leaveType || leave.leaveSubject} leave request has been ${statusMessage}`
-                    ]
-                );
-            }
-        } catch (notifError) {
-            console.error("Notification error (non-critical):", notifError);
+        if (existingRows[0].leaveStatus !== leaveStatus && ["Approved", "Rejected"].includes(leaveStatus)) {
+            await nonCriticalNotification(() => decisionEvent("leave", Number(updatedRows[0].userId), Number(id), leaveStatus, rejectedReason));
         }
 
         return res.status(200).json({
@@ -1119,7 +1120,7 @@ export const deleteLeave = async (req: AuthenticatedRequest, res: Response) => {
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const isAdmin = req.user.role?.toLowerCase() === "admin";
+        const isAdmin = hasPermission(req.user, MODULE.Attendance);
 
         const [rows] = await pool.query<RowDataPacket[]>(
             "SELECT userId, leaveStatus FROM leaves WHERE id = ? AND status = 'Y'",

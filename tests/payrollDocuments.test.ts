@@ -1,0 +1,12 @@
+import assert from "node:assert/strict";
+import puppeteer from "puppeteer-core";
+import { payslipHtml, summaryHtml } from "../services/payrollDocuments";
+const cycle:any={id:99,calendar_session_id:99,month:"October",year:2026,session_name:"2026",run_date:new Date()};
+const row:any={employee_id:7,name:"Employee <Example> with a long name",email:"example@test.invalid",department:"Product and Software Development",designation:"Senior Software Engineer",joined:new Date("2024-01-02"),employment_status:"Active",paid_days:20,working_days:31,scheduled_basic:50000,scheduled_allowances:5000,absence_deduction:1000,gross_salary:54000,loan_deduction:3000,loan_balance_after:12000,overtime_amount:2000,overtime_hours:4,net_salary:51000,payment_date:new Date(),payment_method:"Cash",configured_basic:50000,configured_allowances:5000};
+const brand:any={name:"Technic Mentors",address:"Example address",email:"office@test.invalid",contact:"0000",logo:null};
+(async()=>{const html=payslipHtml(cycle,row,brand);const legacy=payslipHtml(cycle,{...row,scheduled_basic:null,scheduled_allowances:null,absence_deduction:null},brand);assert.ok(legacy.includes("Basic salary earned"));assert.ok(legacy.includes("Rs 49,090.91"));assert.ok(legacy.includes("Gross salary after attendance"));assert.ok(html.includes("watermark"));assert.ok(html.includes("&lt;Example&gt;"));assert.ok(!html.includes("Employee <Example>"));assert.ok(html.includes("Rs 51,000.00"));
+ const browser=await puppeteer.launch({executablePath:"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",headless:true,args:["--no-sandbox"]});
+ try{for(const content of [html,summaryHtml(cycle,Array.from({length:35},(_,i)=>({...row,employee_id:i+1,name:`Employee ${i+1}`})),brand,"Admin")]){const page=await browser.newPage();await page.setContent(content,{waitUntil:"load"});if(process.env.PAYROLL_PREVIEW && content===html) await page.screenshot({path:"tests/payroll_preview.tmp.png",fullPage:true});const pdf=Buffer.from(await page.pdf({format:"A4",printBackground:true,landscape:content!==html}));assert.equal(pdf.subarray(0,4).toString(),"%PDF");assert.ok(pdf.length>10000);if(content===html) assert.equal((pdf.toString("latin1").match(/\/Type\s*\/Page\b/g)||[]).length,1,"payslip must fit on one page");await page.close();}}
+ finally{await browser.close()} console.log("Payroll PDF templates: payslip and 35-employee summary rendered");})().catch(e=>{console.error(e);process.exitCode=1});
+
+

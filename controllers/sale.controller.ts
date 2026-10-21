@@ -7,6 +7,7 @@ export const getSales = async (req: Request, res: Response) => {
       SELECT
   s.id AS id,
   s.invoiceNo,
+  s.salesStatus,
   s.customerId,
   c.customerName,
   DATE_FORMAT(s.saleDate, '%Y-%m-%d') AS saleDate,

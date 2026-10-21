@@ -1,6 +1,9 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import { ResultSetHeader, RowDataPacket } from "mysql2";
+import { projectAssignmentEvent } from "../services/projectTodoEvents";
+import { nonCriticalNotification } from "../services/notificationEvents";
+import { syncProjectChatSafely } from "../services/chatProjects";
 
 interface AssignedProject extends RowDataPacket {
   id: number;
@@ -20,6 +23,8 @@ SELECT
   ap.employee_id,
   ap.projectId,
   ap.date,
+  ap.assigned_by,
+  assigner.name AS assignedByName,
   u.name,
   u.status as userStatus,  -- ✅ ADD THIS
   p.projectName,
@@ -27,6 +32,7 @@ SELECT
   p.completionStatus
 FROM assignedprojects ap
 JOIN tbl_users u ON u.id = ap.employee_id
+LEFT JOIN tbl_users assigner ON assigner.id = ap.assigned_by
 JOIN projects p ON p.id = ap.projectId
 WHERE ap.assignStatus = 'Y'
   AND u.status = 'Active'   -- ✅ EXCLUDE WITHDRAWN EMPLOYEES
@@ -49,6 +55,8 @@ SELECT
   ap.employee_id,
   ap.projectId,
   ap.date,
+  ap.assigned_by,
+  assigner.name AS assignedByName,
   u.name,
   u.status as userStatus,  -- ✅ ADD THIS
   p.projectName,
@@ -56,6 +64,7 @@ SELECT
   p.completionStatus
 FROM assignedprojects ap
 JOIN tbl_users u ON u.id = ap.employee_id
+LEFT JOIN tbl_users assigner ON assigner.id = ap.assigned_by
 JOIN projects p ON p.id = ap.projectId
 WHERE ap.assignStatus = 'Y'
   AND ap.employee_id = ?
@@ -77,6 +86,11 @@ export const addAssignProject = async (
 ): Promise<void> => {
   try {
     const { employee_id, projectId, date } = req.body;
+    const assignerId = Number((req as any).user?.id);
+    if (!Number.isSafeInteger(assignerId) || assignerId <= 0) {
+      res.status(401).json({ message: "Sign in to assign a project" });
+      return;
+    }
 
     if (!employee_id || !projectId) {
       res
@@ -115,34 +129,39 @@ export const addAssignProject = async (
       return;
     }
 
-    // Check if employee is already assigned to this project
-    const [existingAssignment]: any = await pool.query(
-      "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y'",
-      [employee_id, projectId],
-    );
-
-    if (existingAssignment.length > 0) {
-      res.status(400).json({ 
-        message: "Employee is already assigned to this project" 
-      });
-      return;
+    const dateString = date ? date : new Date().toISOString().split("T")[0];
+    const lockName = `project-assign:${employee_id}:${projectId}`;
+    const connection = await pool.getConnection();
+    let assignmentId: number;
+    try {
+      const [locks]: any = await connection.query("SELECT GET_LOCK(?,5) AS acquired",[lockName]);
+      if (locks[0]?.acquired !== 1) {
+        res.status(409).json({ message:"Project assignment is being processed" });
+        return;
+      }
+      const [existingAssignment]: any = await connection.query(
+        "SELECT id FROM assignedprojects WHERE employee_id = ? AND projectId = ? AND assignStatus = 'Y'",
+        [employee_id, projectId],
+      );
+      if (existingAssignment.length > 0) {
+        res.status(400).json({ message:"Employee is already assigned to this project" });
+        return;
+      }
+      const [result] = await connection.query<ResultSetHeader>(
+        "INSERT INTO assignedprojects (employee_id, projectId, date, assignStatus, assigned_by) VALUES (?, ?, ?, 'Y', ?)",
+        [employee_id,projectId,dateString,assignerId],
+      );
+      assignmentId = result.insertId;
+    } finally {
+      try { await connection.query("SELECT RELEASE_LOCK(?)",[lockName]); }
+      finally { connection.release(); }
     }
 
-    const dateString = date ? date : new Date().toISOString().split("T")[0];
-
-    const query = `
-      INSERT INTO assignedprojects (employee_id, projectId, date, assignStatus)
-      VALUES (?, ?, ?, 'Y')
-    `;
-
-    const [result] = await pool.query<ResultSetHeader>(query, [
-      employee_id,
-      projectId,
-      dateString,
-    ]);
+    await nonCriticalNotification(() => projectAssignmentEvent(assignmentId, Number(projectId), Number(employee_id), "assigned", (req as any).user?.id));
+    await syncProjectChatSafely(Number(projectId), (req as any).user?.id);
 
     res.status(201).json({
-      id: result.insertId,
+      id: assignmentId,
       employee_id,
       projectId,
       date: dateString,
@@ -196,7 +215,7 @@ export const editAssignProject = async (
 
     // Check if assignment exists
     const [assignmentExists]: any = await pool.query(
-      "SELECT id FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
+      "SELECT id, employee_id, projectId FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
       [id],
     );
 
@@ -222,7 +241,8 @@ export const editAssignProject = async (
 
     const query = `
       UPDATE assignedprojects
-      SET employee_id = ?, projectId = ?, date = ?
+      SET employee_id = ?, projectId = ?, date = ?,
+          assigned_by = CASE WHEN ? THEN ? ELSE assigned_by END
       WHERE id = ?
     `;
 
@@ -230,8 +250,20 @@ export const editAssignProject = async (
       employee_id,
       projectId,
       dateString,
+      Number(assignmentExists[0].employee_id) !== Number(employee_id) || Number(assignmentExists[0].projectId) !== Number(projectId),
+      (req as any).user?.id ?? null,
       id,
     ]);
+
+    const previous = assignmentExists[0];
+    if (Number(previous.employee_id) !== Number(employee_id) || Number(previous.projectId) !== Number(projectId)) {
+      await nonCriticalNotification(async () => {
+        await projectAssignmentEvent(Number(id),Number(previous.projectId),Number(previous.employee_id),"removed",(req as any).user?.id);
+        await projectAssignmentEvent(Number(id),Number(projectId),Number(employee_id),"assigned",(req as any).user?.id);
+      });
+    }
+    await syncProjectChatSafely(Number(previous.projectId), (req as any).user?.id);
+    if (Number(previous.projectId) !== Number(projectId)) await syncProjectChatSafely(Number(projectId), (req as any).user?.id);
 
     res.json({ 
       message: "Assigned project updated successfully" 
@@ -248,7 +280,7 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
 
     // Check if assignment exists
     const [assignmentExists]: any = await pool.query(
-      "SELECT id FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
+      "SELECT id, employee_id, projectId FROM assignedprojects WHERE id = ? AND assignStatus = 'Y'",
       [id],
     );
 
@@ -264,6 +296,8 @@ export const deleteAssignProject = async (req: Request, res: Response) => {
     `;
 
     await pool.query<ResultSetHeader>(query, [id]);
+    await nonCriticalNotification(() => projectAssignmentEvent(Number(id),Number(assignmentExists[0].projectId),Number(assignmentExists[0].employee_id),"removed",(req as any).user?.id));
+    await syncProjectChatSafely(Number(assignmentExists[0].projectId), (req as any).user?.id);
     res.json({ 
       message: "Assigned project deleted successfully" 
     });
@@ -299,6 +333,8 @@ export const unassignProject = async (req: Request, res: Response) => {
     `;
 
     await pool.query<ResultSetHeader>(query, [id]);
+    await nonCriticalNotification(() => projectAssignmentEvent(Number(id),Number(assignmentExists[0].projectId),Number(assignmentExists[0].employee_id),"removed",(req as any).user?.id));
+    await syncProjectChatSafely(Number(assignmentExists[0].projectId), (req as any).user?.id);
 
     res.json({ 
       success: true,

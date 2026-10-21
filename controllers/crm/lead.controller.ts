@@ -1,3 +1,4 @@
+import { leadStatusPrecondition } from "../../services/leadStatusPreconditions";
 import { Response } from "express";
 import pool from "../../database/db";
 import { AuthenticatedRequest } from "../../middleware/middleware";
@@ -369,6 +370,11 @@ export const updateLead = async (req: AuthenticatedRequest, res: Response): Prom
     }
 
     const oldData = currentLead[0];
+    const formError = leadStatusPrecondition({ ...oldData, ...req.body }, lead_status || oldData.lead_status);
+    if (formError) {
+      res.status(400).json({ message: formError });
+      return;
+    }
 
     const updateFields: string[] = [];
     const updateValues: any[] = [];
@@ -685,6 +691,11 @@ export const updateLeadStatus = async (
 
     const oldStatus = currentLead[0].lead_status;
     const leadData = currentLead[0];
+    const preconditionError = leadStatusPrecondition(leadData, lead_status);
+    if (preconditionError) {
+      res.status(400).json({ message: preconditionError });
+      return;
+    }
 
     // ✅ Update lead status
     await pool.query("UPDATE leads SET lead_status = ? WHERE id = ?", [
@@ -1143,8 +1154,25 @@ export const bulkUpdateStatus = async (
 
     // ✅ Update all selected leads
     const placeholders = ids.map(() => '?').join(',');
+    const [selectedLeads]: any = await pool.query(
+      `SELECT * FROM leads WHERE id IN (${placeholders}) AND status='Y'`, ids);
+    if (selectedLeads.length !== new Set(ids.map(Number)).size) {
+      res.status(404).json({ message: "One or more selected leads are unavailable" });
+      return;
+    }
+    for (const lead of selectedLeads) {
+      const preconditionError = leadStatusPrecondition(lead, status);
+      if (preconditionError) {
+        res.status(400).json({ message: `Lead ${lead.id}: ${preconditionError}` });
+        return;
+      }
+    }
+    if (status === "Won") {
+      res.status(400).json({ message: "Move leads to Won individually so each customer conversion is completed" });
+      return;
+    }
     await pool.query(
-      `UPDATE leads SET lead_status = ? WHERE id IN (${placeholders})`,
+      `UPDATE leads SET lead_status = ? WHERE id IN (${placeholders}) AND status='Y'`,
       [status, ...ids]
     );
 
@@ -1286,10 +1314,10 @@ export const exportLeads = async (
         lead_priority,
         lead_status,
         DATE_FORMAT(created_at, '%Y-%m-%d') as created_date,
-        follow_up_date,
+        DATE_FORMAT(follow_up_date, '%Y-%m-%d') AS follow_up_date,
         deal_value,
         probability,
-        expected_close_date,
+        DATE_FORMAT(expected_close_date, '%Y-%m-%d') AS expected_close_date,
         address,
         company_size,
         linkedin,
@@ -1327,11 +1355,7 @@ export const exportLeads = async (
 
     const [rows] = await pool.query<RowDataPacket[]>(query, params);
 
-    if (rows.length === 0) {
-      res.status(404).json({ message: "No leads found to export" });
-      return;
-    }
-
+    // Empty results still export as a valid CSV with column headings.
     // ✅ Convert to CSV
     const headers = [
       'ID', 'Company', 'Contact Person', 'Designation', 'Mobile',

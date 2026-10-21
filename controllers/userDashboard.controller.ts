@@ -2,11 +2,8 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket } from "mysql2";
 import moment from "moment-timezone";
-
-const toYMD = (d: Date): string =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
+import { attendanceStartDate, countAttendanceWindow } from "../utils/attendanceEligibility";
+import { isRecordedAttendanceOverride, normalizeAttendanceStatus } from "../utils/attendanceStatus";
 
 export const getUserDashboard = async (
   req: any,
@@ -17,6 +14,16 @@ export const getUserDashboard = async (
     if (!userId) {
       res.status(401).json({ message: "Unauthorized" });
       return; // ✅ FIX: return missing tha
+    }
+
+    const [userRows] = await pool.query<RowDataPacket[]>(
+      `SELECT DATE_FORMAT(COALESCE(date, created_at), '%Y-%m-%d') AS joiningDate
+       FROM tbl_users WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+    if (!userRows.length || !userRows[0].joiningDate) {
+      res.status(404).json({ message: "Employee joining date not found" });
+      return;
     }
 
     // ============================================================
@@ -33,6 +40,8 @@ export const getUserDashboard = async (
 
     // Aaj (Asia/Karachi) — markAttendance bhi isi timezone mein save karta hai
     const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+    const monthStart = moment.tz("Asia/Karachi").startOf("month").format("YYYY-MM-DD");
+    const startDate = attendanceStartDate(monthStart, userRows[0].joiningDate);
     const nowTimeStr = moment.tz("Asia/Karachi").format("HH:mm:ss");
     const isPastLateThreshold = nowTimeStr >= lateTime;
 
@@ -43,45 +52,25 @@ export const getUserDashboard = async (
       `
       SELECT
         DATE_FORMAT(date, '%Y-%m-%d') AS d,
-        attendanceStatus
+        attendanceStatus, type, remoteStatus
       FROM attendance
       WHERE userId = ?
         AND status = 'Y'
-        AND MONTH(date) = MONTH(CURRENT_DATE())
-        AND YEAR(date) = YEAR(CURRENT_DATE())
-        AND DATE(date) <= CURRENT_DATE()
+        AND DATE(date) >= ?
+        AND DATE(date) <= ?
       ORDER BY id ASC
       `,
-      [userId]
+      [userId, startDate, todayStr]
     );
 
     // ✅ Dedupe: same date par multiple rows (short leave cycles) ko
     // ek priority-based final status do.
-    // Priority: Present > Late > Short Leave > Half Leave > Leave > Absent
-    const statusPriority = [
-      "present",
-      "late",
-      "short leave",
-      "half leave",
-      "leave",
-      "absent",
-    ];
-
     const dailyStatus = new Map<string, string>();
     attendanceRows.forEach((row) => {
-      const dateKey = row.d;
-      const s = (row.attendanceStatus || "").toLowerCase().trim();
-      if (!s) return;
-
-      const existing = dailyStatus.get(dateKey);
-      if (!existing) {
-        dailyStatus.set(dateKey, s);
-      } else {
-        const existingIdx = statusPriority.indexOf(existing);
-        const newIdx = statusPriority.indexOf(s);
-        if (newIdx !== -1 && (existingIdx === -1 || newIdx < existingIdx)) {
-          dailyStatus.set(dateKey, s);
-        }
+      const status = normalizeAttendanceStatus(row.attendanceStatus);
+      const existing = dailyStatus.get(row.d);
+      if (status && (isRecordedAttendanceOverride(status) || !isRecordedAttendanceOverride(existing))) {
+        dailyStatus.set(row.d, status);
       }
     });
 
@@ -90,31 +79,47 @@ export const getUserDashboard = async (
     // ============================================================
     const [leaveRows] = await pool.query<RowDataPacket[]>(
       `
-      SELECT fromDate, toDate, leaveType
+      SELECT DATE_FORMAT(fromDate, '%Y-%m-%d') AS fromDate,
+             DATE_FORMAT(toDate, '%Y-%m-%d') AS toDate, leaveType
       FROM leaves
       WHERE userId = ?
         AND status = 'Y'
         AND LOWER(leaveStatus) = 'approved'
-        AND fromDate <= LAST_DAY(CURRENT_DATE())
-        AND toDate >= DATE_FORMAT(CURRENT_DATE(), '%Y-%m-01')
+        AND fromDate <= ?
+        AND toDate >= ?
+        AND ? <= ?
       `,
-      [userId]
+      [userId, todayStr, startDate, startDate, todayStr]
     );
 
     const leaveRanges = leaveRows.map((l) => ({
-      from: toYMD(new Date(l.fromDate)),
-      to: toYMD(new Date(l.toDate)),
+      from: l.fromDate as string,
+      to: l.toDate as string,
     }));
 
     const isOnApprovedLeave = (dayStr: string) =>
+      !isRecordedAttendanceOverride(dailyStatus.get(dayStr)) &&
       leaveRanges.some((r) => dayStr >= r.from && dayStr <= r.to);
+
+    const [remoteRows] = await pool.query<RowDataPacket[]>(
+      `SELECT DATE_FORMAT(remoteFromDate, '%Y-%m-%d') AS fromDate,
+              DATE_FORMAT(remoteToDate, '%Y-%m-%d') AS toDate
+       FROM attendance
+       WHERE userId = ? AND status = 'Y'
+         AND LOWER(type) = 'remote' AND LOWER(remoteStatus) = 'approved'
+         AND remoteFromDate <= ? AND remoteToDate >= ?`,
+      [userId, todayStr, startDate]
+    );
+    const remoteRanges = remoteRows.map((r) => ({ from: r.fromDate as string, to: r.toDate as string }));
+    const isApprovedRemote = (dayStr: string) =>
+      remoteRanges.some((r) => dayStr >= r.from && dayStr <= r.to);
 
     // ============================================================
     // 3️⃣ ATTENDANCE COUNTERS (ab isOnApprovedLeave available hai)
     // ============================================================
     let presents = 0;
     let lateCount = 0;
-    let explicitAbsents = 0;
+    const explicitAbsentDates: string[] = [];
     let shortLeave = 0;
     let halfLeave = 0;
     let attendanceLeaveDays = 0;
@@ -129,7 +134,7 @@ export const getUserDashboard = async (
         // ✅ FIX: agar us din approved leave hai to absent count NA karo
         // (leave already leaves table se count ho rahi hai)
         if (!isOnApprovedLeave(dayStr)) {
-          explicitAbsents++;
+          explicitAbsentDates.push(dayStr);
         }
       } else if (s === "short leave") {
         shortLeave++;
@@ -161,54 +166,45 @@ export const getUserDashboard = async (
     // ============================================================
     const [holidayRangeRows] = await pool.query<RowDataPacket[]>(
       `
-      SELECT fromDate, toDate
+      SELECT DATE_FORMAT(fromDate, '%Y-%m-%d') AS fromDate,
+             DATE_FORMAT(toDate, '%Y-%m-%d') AS toDate
       FROM holidays
       WHERE holidayStatus = 'Y'
-        AND fromDate <= LAST_DAY(CURRENT_DATE())
-        AND toDate >= DATE_FORMAT(CURRENT_DATE(), '%Y-%m-01')
-      `
+        AND fromDate <= ?
+        AND toDate >= ?
+        AND ? <= ?
+      `,
+      [todayStr, startDate, startDate, todayStr]
     );
     const holidayRanges = holidayRangeRows.map((h) => ({
-      from: toYMD(new Date(h.fromDate)),
-      to: toYMD(new Date(h.toDate)),
+      from: h.fromDate as string,
+      to: h.toDate as string,
     }));
     const isHoliday = (dayStr: string) =>
       holidayRanges.some((h) => dayStr >= h.from && dayStr <= h.to);
 
+    const explicitAbsents = explicitAbsentDates.filter((dayStr) => {
+      const dayName = moment.tz(dayStr, "YYYY-MM-DD", "Asia/Karachi").format("dddd");
+      return !offDays.includes(dayName) && !isHoliday(dayStr) &&
+        (dayStr !== todayStr || isPastLateThreshold);
+    }).length;
+
     // ============================================================
     // 6️⃣ WORKING DAYS + MISSING DAY ABSENTS
     // ============================================================
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth();
-    const todayDate = now.getDate();
+    const { workingDays, missingDayAbsents, approvedRemoteDays } = countAttendanceWindow({
+      monthStart,
+      today: todayStr,
+      joiningDate: userRows[0].joiningDate,
+      offDays,
+      isHoliday,
+      attendanceStatus: (day) => dailyStatus.get(day),
+      isOnApprovedLeave,
+      isApprovedRemote,
+      isPastLateThreshold,
+    });
 
-    let workingDays = 0;
-    let missingDayAbsents = 0;
-
-    for (let day = 1; day <= todayDate; day++) {
-      const d = new Date(year, month, day);
-      const dayName = d.toLocaleDateString("en-US", { weekday: "long" });
-      if (offDays.includes(dayName)) continue;
-
-      const dayStr = toYMD(d);
-      if (isHoliday(dayStr)) continue;
-
-      workingDays++;
-
-      // 1. Attendance row maujood → skip
-      if (dailyStatus.has(dayStr)) continue;
-
-      // 2. Approved leave → skip (absent nahi)
-      if (isOnApprovedLeave(dayStr)) continue;
-
-      // 3. Aaj ka din + threshold nahi guzra → pending, absent nahi
-      if (dayStr === todayStr && !isPastLateThreshold) continue;
-
-      // 4. Warna: threshold guzar chuka, na attendance, na leave → Absent
-      missingDayAbsents++;
-    }
-
+    presents += approvedRemoteDays;
     const absents = explicitAbsents + missingDayAbsents;
 
     // ============================================================
@@ -231,15 +227,26 @@ export const getUserDashboard = async (
       `,
       [userId]
     );
+    const [progressTrend] = await pool.query<RowDataPacket[]>(
+      `SELECT DATE_FORMAT(date, '%Y-%m-%d') AS date, COUNT(*) AS count
+       FROM progress
+       WHERE employee_id = ? AND progressStatus = 'Y'
+         AND DATE(date) BETWEEN ? AND ?
+       GROUP BY DATE_FORMAT(date, '%Y-%m-%d')
+       ORDER BY DATE_FORMAT(date, '%Y-%m-%d')`,
+      [userId, moment.tz("Asia/Karachi").subtract(6, "days").format("YYYY-MM-DD"), todayStr]
+    );
 
     const [holidays] = await pool.query<RowDataPacket[]>(
       `
       SELECT COUNT(*) AS holidays
       FROM holidays
       WHERE holidayStatus = 'Y'
-        AND fromDate <= LAST_DAY(CURRENT_DATE())
-        AND toDate >= DATE_FORMAT(CURRENT_DATE(), '%Y-%m-01')
-      `
+        AND fromDate <= ?
+        AND toDate >= ?
+        AND ? <= ?
+      `,
+      [todayStr, startDate, startDate, todayStr]
     );
 
     // ============================================================
@@ -263,6 +270,7 @@ export const getUserDashboard = async (
 
       totalTodos: todos[0].totalTodos || 0,
       totalProgress: progress[0].totalProgress || 0,
+      progressTrend,
       holidays: holidays[0]?.holidays || 0,
     });
   } catch (error) {

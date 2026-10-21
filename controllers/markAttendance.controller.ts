@@ -1,22 +1,9 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import moment from "moment-timezone";
-
-// Helper function to calculate distance
-const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-    const R = 6371e3;
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
-            Math.cos(φ1) * Math.cos(φ2) *
-            Math.sin(Δλ/2) * Math.sin(Δλ/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-    return R * c;
-};
+import { assessGeofence, validCoordinates } from "../utils/geofence";
+import { attendanceEvent, nonCriticalNotification } from "../services/notificationEvents";
+import { getMobileClockSettings, isMobileAttendanceRequest } from "./attendanceMobileSettings.controller";
 
 // Helper function to determine attendance status
 const determineAttendanceStatus = (
@@ -340,15 +327,51 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
 // ============================================================
 // MARK ATTENDANCE - WITH LEAVE CHECKS
 // ============================================================
+export const getGeofenceStatus = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const userId = (req as any).user?.id;
+        const { latitude, longitude } = req.query;
+        if (!userId) {
+            res.status(401).json({ message: "Unauthorized" });
+            return;
+        }
+        if (!validCoordinates(latitude, longitude)) {
+            res.status(400).json({ message: "Valid GPS coordinates are required", code: "LOCATION_INVALID" });
+            return;
+        }
+
+        const [ruleRows]: any = await pool.query(
+            "SELECT officeLatitude, officeLongitude, allowedRadius FROM attendance_rules WHERE status = 'Active' LIMIT 1"
+        );
+        const today = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+        const [remoteRows]: any = await pool.query(
+            `SELECT id FROM attendance WHERE userId = ? AND remoteStatus = 'Approved'
+             AND remoteFromDate <= ? AND remoteToDate >= ? AND status = 'Y' LIMIT 1`,
+            [userId, today, today]
+        );
+        const [openRows]: any = await pool.query(
+            `SELECT type FROM attendance WHERE userId = ? AND date = ? AND status = 'Y'
+             AND clockIn IS NOT NULL AND clockOut IS NULL ORDER BY id DESC LIMIT 1`,
+            [userId, today]
+        );
+        const exempt = remoteRows.length > 0 || openRows[0]?.type === "Remote";
+        const assessment = assessGeofence(Number(latitude), Number(longitude), ruleRows[0] || null);
+        res.json({ ...assessment, exempt, enforced: assessment.configured && !exempt });
+    } catch (error) {
+        console.error("Geofence Status Error:", error);
+        res.status(500).json({ message: "Failed to check office geofence" });
+    }
+};
+
 export const markAttendance = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.params.id;
         const { latitude, longitude, isRemote } = req.body;
 
-        if (!latitude || !longitude) {
+        if (!validCoordinates(latitude, longitude)) {
             res.status(400).json({
-                message: "Location is required",
-                code: "LOCATION_REQUIRED"
+                message: "Valid GPS coordinates are required",
+                code: "LOCATION_INVALID"
             });
             return;
         }
@@ -412,6 +435,19 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             [userId, today, today]
         );
         const hasApprovedRemoteToday = approvedRemoteRows.length > 0;
+
+        // The existing attendance decides whether this is clock in or clock out.
+        if (isMobileAttendanceRequest(req)) {
+            const settings = await getMobileClockSettings();
+            if (hasOpenClockIn && !settings.allowClockOut) {
+                res.status(403).json({ message: "Clock Out from mobile devices is disabled by Attendance Configuration." });
+                return;
+            }
+            if (!hasOpenClockIn && !settings.allowClockIn) {
+                res.status(403).json({ message: "Clock In from mobile devices is disabled by Attendance Configuration." });
+                return;
+            }
+        }
 
         // ============================================================
         // 3️⃣ DETERMINE MAX CLOCK INS BASED ON LEAVE TYPE
@@ -490,25 +526,17 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         // ============================================================
         // ✅ For clock OUT, use the record's own type (set at clock-in) so a user
         // can't bypass the radius check by sending isRemote=true only when clocking out.
-        const effectiveIsRemote = (hasOpenClockIn && openRecord)
-            ? openRecord.type === "Remote"
-            : !!isRemote;
+        const effectiveIsRemote = hasApprovedRemoteToday ||
+            (hasOpenClockIn && openRecord?.type === "Remote");
 
-        if (!hasApprovedRemoteToday && !effectiveIsRemote && activeRule && activeRule.officeLatitude && activeRule.officeLongitude) {
-            const distance = calculateDistance(
-                parseFloat(latitude),
-                parseFloat(longitude),
-                parseFloat(activeRule.officeLatitude),
-                parseFloat(activeRule.officeLongitude)
-            );
-            const allowedRadius = activeRule.allowedRadius || 100;
-
-            if (distance > allowedRadius) {
+        if (!effectiveIsRemote) {
+            const geofence = assessGeofence(Number(latitude), Number(longitude), activeRule);
+            if (geofence.configured && !geofence.withinRange) {
                 res.status(400).json({
-                    message: `You must be within ${allowedRadius}m of the office to mark attendance. You are ${Math.round(distance)}m away.`,
+                    message: `You must be within ${geofence.allowedRadius}m of the office to mark attendance. You are ${Math.ceil(geofence.distanceMeters!)}m away.`,
                     code: "OUTSIDE_ALLOWED_RADIUS",
-                    distance: Math.round(distance),
-                    allowedRadius
+                    distance: Math.ceil(geofence.distanceMeters!),
+                    allowedRadius: geofence.allowedRadius
                 });
                 return;
             }
@@ -570,6 +598,8 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 [currentTime, diff, finalStatus, latitude, longitude, record.id]
             );
 
+            await nonCriticalNotification(() => attendanceEvent(Number(userId), Number(record.id), "out", { date: today, time: currentTime, clockIn: String(record.clockIn), worked: diff, status: finalStatus }));
+
             res.status(200).json({
                 message: "Clock Out successful",
                 status: finalStatus,
@@ -625,7 +655,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
 
         // ✅ CLOCK IN - Allowed
         let attendanceStatus = "Present";
-        const type = isRemote ? "Remote" : "Onsite";
+        const type = hasApprovedRemoteToday && isRemote ? "Remote" : "Onsite";
 
         if (hasApprovedLeave && leaveType === 'SHORT LEAVE') {
             attendanceStatus = "Short Leave";
@@ -653,11 +683,13 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
             ]
         );
 
+        await nonCriticalNotification(() => attendanceEvent(Number(userId), Number((result as any).insertId), "in", { date: today, time: currentTime, status: attendanceStatus }));
+
         res.status(200).json({
             message: `Clock In successful`,
             status: attendanceStatus,
             type: type,
-            isRemote: isRemote,
+            isRemote: type === "Remote",
             isLeave: hasApprovedLeave,
             leaveType: leaveTypeName,
             clockInNumber: totalClockIns + 1,

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { employeeNotice } from "../services/employeeNotificationEvents";
 
 export const withdrawEmployee = async (
   req: Request,
@@ -41,6 +42,8 @@ export const withdrawEmployee = async (
       WHERE id = ?
     `;
     await pool.query(updateQuery, [id]);
+    try { await employeeNotice(Number(id),"Employment status updated","Your employment status changed to Inactive.",`employee:${id}:withdrawn`); }
+    catch (error) { console.error("Employment status notification failed:",error); }
 
     res.status(201).json({
       status: 201,
@@ -66,9 +69,9 @@ export const getWithdrawnEmployees = async (
     // ✅ Driven by tbl_users.status/loginStatus (LEFT JOIN withdrawals),
     // not just the withdrawals table. An employee can end up
     // Inactive/loginStatus=N through paths other than the Withdraw button
-    // (delete, resignation, admin deactivate) — those never insert a
+    // (resignation, admin deactivate) — those never insert a
     // withdrawals row, so an INNER JOIN silently hid them from this list.
-    // Now: inactive/disabled-login employees always show up here, with
+    // Deleted employees are excluded; inactive/disabled-login employees show up here, with
     // whatever withdrawal reason/date is on record if one exists.
     const [rows] = await pool.query(
       `
@@ -89,6 +92,7 @@ export const getWithdrawnEmployees = async (
       LEFT JOIN withdrawals w
         ON w.employee_id = l.id AND w.withdrawStatus = 'Y'
       WHERE LOWER(l.role) = 'user'
+        AND l.status <> 'Deleted'
         AND (l.status != 'Active' OR l.loginStatus = 'N')
       ORDER BY l.id ASC
       `,
@@ -122,11 +126,11 @@ export const reActiveEmployee = async (
     // row at all, so requiring one here made them impossible to reactivate
     // from the Withdrawn list.
     const [userRows]: any = await pool.query(
-      "SELECT id FROM tbl_users WHERE id = ?",
+      "SELECT id,status FROM tbl_users WHERE id = ?",
       [employeeId],
     );
 
-    if (userRows.length === 0) {
+    if (userRows.length === 0 || userRows[0].status === "Deleted") {
       res.status(404).json({ message: "Employee does not exist" });
       return;
     }
@@ -145,6 +149,8 @@ await pool.query(
    WHERE id = ?`,
   [employeeId]
 );
+    try { if (userRows[0].status !== "Active") await employeeNotice(employeeId,"Employment status updated","Your employment status changed to Active.",`employee:${employeeId}:reactivated:${Date.now()}`); }
+    catch (error) { console.error("Employment status notification failed:",error); }
 
     res.status(200).json({ message: "Employee reactivated successfully" });
   } catch (error) {

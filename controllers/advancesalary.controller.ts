@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/middleware";
 import pool from "../database/db";
+import { hasPermission, MODULE } from "../permissionModel";
 
 export const getAllAdvanceSalary = async (
   req: AuthenticatedRequest,
@@ -54,6 +55,11 @@ export const createAdvanceSalary = async (
   res: Response,
 ): Promise<void> => {
   const { employee_id, date, amount, description } = req.body;
+
+  if (!hasPermission(req.user, MODULE.Payroll) && Number(employee_id) !== req.user?.id) {
+    res.status(403).json({ message: "Forbidden" });
+    return;
+  }
 
   if (!employee_id || !date || !amount || !description) {
     res.status(400).json({ message: "All fields are required" });

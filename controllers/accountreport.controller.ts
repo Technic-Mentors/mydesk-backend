@@ -6,8 +6,9 @@ export const getAccountReport = async (req: Request, res: Response) => {
     const [employeeAccounts]: any = await pool.query(`
       SELECT 
   ea.id,
+  ea.employee_id AS ownerId,
   'Employee' AS account_type,
-  e.employee_name AS name,
+  COALESCE(NULLIF(u.name, ''), CONCAT('Employee #', ea.employee_id)) AS name,
   ea.refNo,
   ea.invoiceNo,
   ea.debit,
@@ -15,8 +16,8 @@ export const getAccountReport = async (req: Request, res: Response) => {
   ea.payment_method AS paymentMethod,
   ea.payment_date AS paymentDate
 FROM employee_accounts ea
-LEFT JOIN employee_lifeline e ON e.employee_id = ea.employee_id
-ORDER BY ea.payment_date ASC
+LEFT JOIN tbl_users u ON u.id = ea.employee_id
+ORDER BY ea.payment_date ASC, ea.id ASC
     `);
 
     const [customerAccounts]: any = await pool.query(`

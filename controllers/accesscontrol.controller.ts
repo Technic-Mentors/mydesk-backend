@@ -14,10 +14,13 @@ export const getAccessControl = async (req: Request, res: Response) => {
   const { roleId } = req.params;
   try {
     const query = `
-      SELECT ac.moduleId, m.moduleName, ac.status 
-      FROM access_control ac
-      JOIN modules m ON ac.moduleId = m.id
-      WHERE ac.roleId = ?`;
+      SELECT m.id AS moduleId, m.moduleName,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM access_control ac
+          WHERE ac.roleId = ? AND ac.moduleId = m.id AND ac.status = 1
+        ) THEN 1 ELSE 0 END AS status
+      FROM modules m
+      ORDER BY m.id`;
 
     const [permissions] = await pool.query(query, [roleId]);
     res.status(200).json({ permissions });
@@ -65,14 +68,18 @@ export const addAccessControl = async (req: Request, res: Response) => {
   }
 };
 
+// Full replacement: permissions must include every module, and expectedModuleIds
+// must match the grants read when the edit form opened.
 export const updateAccessControl = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
-  const { roleId, permissions } = req.body;
+  const { roleId, permissions, expectedModuleIds } = req.body;
 
-  if (!roleId || !permissions) {
-    res.status(400).json({ message: "Missing roleId or permissions" });
+  if (!roleId || !permissions || typeof permissions !== "object" || Array.isArray(permissions) ||
+      !Array.isArray(expectedModuleIds) || expectedModuleIds.some((id: unknown) =>
+        !Number.isSafeInteger(Number(id)) || Number(id) <= 0)) {
+    res.status(400).json({ message: "Missing or invalid role permissions" });
     return;
   }
 
@@ -80,20 +87,42 @@ export const updateAccessControl = async (
   try {
     await connection.beginTransaction();
 
-    await connection.query("DELETE FROM access_control WHERE roleId = ?", [
-      roleId,
-    ]);
-
     const [moduleRows]: any = await connection.query(
       "SELECT id, moduleName FROM modules",
     );
-    const moduleMap = new Map(moduleRows.map((m: any) => [m.moduleName, m.id]));
+    const moduleNames = new Set(moduleRows.map((module: any) => module.moduleName));
+    const suppliedNames = Object.keys(permissions);
+    if (!moduleRows.length || suppliedNames.length !== moduleRows.length ||
+        suppliedNames.some((name) => !moduleNames.has(name)) ||
+        Object.values(permissions).some((status) =>
+          ![true, false, 1, 0, "1", "0"].includes(status as any))) {
+      await connection.rollback();
+      res.status(409).json({ message: "Permission list is incomplete or outdated. Reload and try again." });
+      return;
+    }
+
+    const [currentRows]: any = await connection.query(
+      "SELECT moduleId FROM access_control WHERE roleId = ? AND status = 1 FOR UPDATE",
+      [roleId],
+    );
+    const expectedIds = new Set(expectedModuleIds.map((id: number | string) => String(Number(id))));
+    const currentIds = new Set(currentRows.map((row: any) => String(Number(row.moduleId))));
+    if (expectedIds.size !== expectedModuleIds.length ||
+        expectedIds.size !== currentIds.size ||
+        [...expectedIds].some((id) => !currentIds.has(id))) {
+      await connection.rollback();
+      res.status(409).json({ message: "Permissions changed since this form opened. Reload and try again." });
+      return;
+    }
+
+    // This endpoint replaces the complete grant set for the role.
+    await connection.query("DELETE FROM access_control WHERE roleId = ?", [roleId]);
 
     const values: any[] = [];
-    for (const [moduleName, status] of Object.entries(permissions)) {
-      const moduleId = moduleMap.get(moduleName);
-      if (status && moduleId) { 
-        values.push([roleId, moduleId, status]);
+    for (const module of moduleRows) {
+      const status = permissions[module.moduleName];
+      if (status === true || status === 1 || status === "1") {
+        values.push([roleId, module.id, 1]);
       }
     }
 

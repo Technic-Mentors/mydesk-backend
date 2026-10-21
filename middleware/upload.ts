@@ -1,4 +1,5 @@
 import multer from "multer";
+import { RequestHandler } from "express";
 import path from "path";
 import fs from "fs";
 
@@ -45,4 +46,19 @@ export const upload = multer({
 });
 
 export const uploadSingle = upload.single("file");
-export const uploadMultiple = upload.array("files", 5);
+const projectUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 5 },
+});
+
+export const uploadMultiple: RequestHandler = (req, res, next) => {
+  projectUpload.array("files", 5)(req, res, (error) => {
+    if (!error) { next(); return; }
+    const message = error instanceof multer.MulterError
+      ? error.code === "LIMIT_FILE_SIZE"
+        ? "Each project file must be 10 MB or smaller"
+        : "Choose up to 5 project files"
+      : error.message || "Could not upload project files";
+    res.status(400).json({ message });
+  });
+};

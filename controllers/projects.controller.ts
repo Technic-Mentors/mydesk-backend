@@ -1,5 +1,8 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
+import { projectChangeEvent, projectStatusEvent } from "../services/projectTodoEvents";
+import { nonCriticalNotification } from "../services/notificationEvents";
+import { syncProjectChatSafely } from "../services/chatProjects";
 
 export const getAllProjects = async (
   req: Request,
@@ -28,6 +31,30 @@ export const getAllProjects = async (
   } catch (error) {
     console.error("Error fetching projects:", error);
     res.status(500).json({ message: "Failed to fetch projects" });
+  }
+};
+
+export const getProjectById = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      res.status(400).json({ message: "Invalid project ID" });
+      return;
+    }
+    const [rows]: any = await pool.query(
+      `SELECT id, projectName, projectCategory, description, completionStatus, isOnGoing,
+        DATE_FORMAT(startDate, '%Y-%m-%d') AS startDate,
+        DATE_FORMAT(endDate, '%Y-%m-%d') AS endDate,
+        DATE_FORMAT(deadlineDate, '%Y-%m-%d') AS deadlineDate
+       FROM projects WHERE id=? AND projectStatus='Y'`, [id]);
+    if (!rows.length) {
+      res.status(404).json({ message: "Project not found" });
+      return;
+    }
+    res.json(rows[0]);
+  } catch (error) {
+    console.error("Error fetching project:", error);
+    res.status(500).json({ message: "Failed to fetch project" });
   }
 };
 
@@ -80,7 +107,7 @@ export const addProject = async (
       return;
     }
 
-    await pool.query(
+    const [created]: any = await pool.query(
       `
   INSERT INTO projects 
   (projectName, projectCategory, description, startDate, endDate, projectStatus, completionStatus , isOnGoing)
@@ -96,8 +123,10 @@ export const addProject = async (
         endDate ? 0 : 1,
       ],
     );
+    await syncProjectChatSafely(Number(created.insertId), (req as any).user?.id);
+    await nonCriticalNotification(() => projectChangeEvent(Number(created.insertId), [`Category: ${trimmedCategory}`, `Status: ${completionStatus || "New"}`], (req as any).user?.id, true));
 
-    res.status(201).json({ message: "Project added successfully" });
+    res.status(201).json({ message: "Project added successfully", id: Number(created.insertId) });
   } catch (error) {
     console.error("Error adding project:", error);
     res.status(500).json({ message: "Failed to add project" });
@@ -122,7 +151,7 @@ export const updateProject = async (
 
     const safeEndDate = endDate ? endDate : null;
 
-    if (!projectName || !projectCategory || !startDate || !completionStatus) {
+    if (!projectName || !projectCategory || !startDate) {
       res.status(400).json({ message: "Required fields are missing" });
       return;
     }
@@ -156,6 +185,53 @@ export const updateProject = async (
       return;
     }
 
+    const [previousRows]: any = await pool.query(
+      `SELECT projectName, projectCategory, description,
+        DATE_FORMAT(startDate, '%Y-%m-%d') AS startDate,
+        DATE_FORMAT(endDate, '%Y-%m-%d') AS endDate,
+        DATE_FORMAT(deadlineDate, '%Y-%m-%d') AS deadlineDate,
+        completionStatus, isOnGoing
+       FROM projects WHERE id=? AND projectStatus='Y'`, [id]);
+    if (!previousRows.length) {
+      res.status(404).json({ message: "Project not found" });
+      return;
+    }
+    const previous = previousRows[0];
+    const nextStatus = completionStatus || previous.completionStatus;
+    const nextDeadline = deadlineDate || null;
+    if (nextStatus === "Working" && (!nextDeadline || new Date(nextDeadline) < new Date(startDate))) {
+      res.status(400).json({ message: "A deadline on or after the start date is required for a working project" });
+      return;
+    }
+    if (!["New", "Working", "Completed"].includes(nextStatus)) {
+      res.status(400).json({ message: "Invalid completion status" });
+      return;
+    }
+    const next = {
+      projectName: trimmedName,
+      projectCategory: trimmedCategory,
+      description: description ?? "",
+      startDate,
+      endDate: safeEndDate,
+      deadlineDate: deadlineDate || null,
+      completionStatus: nextStatus,
+      isOnGoing: safeEndDate ? 0 : 1,
+    };
+    const changes: string[] = [];
+    const describe = (label: string, before: unknown, after: unknown) => {
+      const oldValue = String(before ?? "").trim();
+      const newValue = String(after ?? "").trim();
+      if (oldValue !== newValue) changes.push(`${label}: ${oldValue || "none"} to ${newValue || "none"}`);
+    };
+    describe("Name", previous.projectName, next.projectName);
+    describe("Category", previous.projectCategory, next.projectCategory);
+    describe("Description", previous.description, next.description);
+    describe("Start date", previous.startDate, next.startDate);
+    describe("End date", previous.endDate, next.endDate);
+    describe("Deadline", previous.deadlineDate, next.deadlineDate);
+    describe("Status", previous.completionStatus, next.completionStatus);
+    if (Number(previous.isOnGoing) !== next.isOnGoing) changes.push(`Ongoing: ${next.isOnGoing ? "yes" : "no"}`);
+
     await pool.query(
   `
   UPDATE projects
@@ -171,17 +247,22 @@ export const updateProject = async (
   WHERE id = ?
   `,
   [
-    trimmedName,
-    trimmedCategory,
-    description,
-    startDate,
-    safeEndDate,
-    deadlineDate || null,  // 👈 NEW
-    completionStatus,
-    endDate ? 0 : 1,
+    next.projectName,
+    next.projectCategory,
+    next.description,
+    next.startDate,
+    next.endDate,
+    next.deadlineDate,
+    next.completionStatus,
+    next.isOnGoing,
     id,
   ],
 );
+    await syncProjectChatSafely(Number(id), (req as any).user?.id);
+
+    if (changes.length) {
+      await nonCriticalNotification(() => projectChangeEvent(Number(id), changes, (req as any).user?.id));
+    }
 
     const [updatedRows]: any = await pool.query(
       `
@@ -193,7 +274,8 @@ export const updateProject = async (
         DATE_FORMAT(startDate, '%Y-%m-%d') as startDate,
         DATE_FORMAT(endDate, '%Y-%m-%d') as endDate,
         DATE_FORMAT(deadlineDate, '%Y-%m-%d') as deadlineDate,
-        completionStatus
+        completionStatus,
+        isOnGoing
       FROM projects
       WHERE id = ?
       `,
@@ -224,14 +306,37 @@ export const updateCompletionStatus = async (
       return;
     }
 
+    const [previousRows]: any = await pool.query(
+      "SELECT completionStatus, projectName, projectCategory, startDate, endDate, deadlineDate " +
+      "FROM projects WHERE id=? AND projectStatus='Y'", [id]);
+    if (!previousRows.length) {
+      res.status(404).json({ message: "Project not found" });
+      return;
+    }
+    const project = previousRows[0];
+    if (!project.projectName || !project.projectCategory || !project.startDate ||
+        (project.endDate && new Date(project.startDate) > new Date(project.endDate))) {
+      res.status(400).json({ message: "Complete valid project details before changing status" });
+      return;
+    }
+    if (completionStatus === "Working" && (!project.deadlineDate ||
+        new Date(project.deadlineDate) < new Date(project.startDate))) {
+      res.status(400).json({ message: "Set a deadline on or after the start date before moving this project to Working" });
+      return;
+    }
+
     const [result]: any = await pool.query(
-      `UPDATE projects SET completionStatus = ? WHERE id = ?`,
+      `UPDATE projects SET completionStatus = ? WHERE id = ? AND projectStatus='Y'`,
       [completionStatus, id],
     );
 
     if (result.affectedRows === 0) {
       res.status(404).json({ message: "Project not found" });
       return;
+    }
+
+    if (previousRows.length && previousRows[0].completionStatus !== completionStatus) {
+      await nonCriticalNotification(() => projectStatusEvent(Number(id),previousRows[0].completionStatus || "New",completionStatus,(req as any).user?.id));
     }
 
     res.status(200).json({ message: "Status updated successfully" });
@@ -256,6 +361,7 @@ export const deleteProject = async (
       `,
       [id],
     );
+    await syncProjectChatSafely(Number(id), (req as any).user?.id);
 
     res.status(200).json({ message: "Project deleted successfully" });
   } catch (error) {

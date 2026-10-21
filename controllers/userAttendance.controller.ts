@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
+import { adminAttendanceRecorded, nonCriticalNotification } from "../services/notificationEvents";
 
 const toMySQLDate = (dateStr: string | null): string | null => {
   if (!dateStr) return null;
@@ -17,6 +18,27 @@ const toMySQLDate = (dateStr: string | null): string | null => {
   } catch (error) {
     return null;
   }
+};
+
+const findConflictingApprovedLeave = async (
+  userId: number,
+  date: string,
+  attendanceStatus: string,
+): Promise<RowDataPacket | null> => {
+  const status = attendanceStatus.trim().toLowerCase();
+  if (status === "leave") return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT id, leaveType, leaveSubject FROM leaves " +
+      "WHERE userId = ? AND status = 'Y' AND LOWER(leaveStatus) = 'approved' " +
+      "AND ? BETWEEN fromDate AND toDate",
+    [userId, date],
+  );
+  return rows.find((leave) => {
+    const type = String(leave.leaveType || leave.leaveSubject || "").trim().toLowerCase();
+    if (status === "short leave" && type.includes("short")) return false;
+    if (status === "half leave" && type.includes("half")) return false;
+    return true;
+  }) || null;
 };
 
 const calculateWorkingHours = (
@@ -74,9 +96,37 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
         created_at,
         updated_at
       FROM tbl_users 
-      WHERE status = 'Y'`
+      WHERE LOWER(role) = 'user'`
     );
-    res.json({ users: rows });
+    const selectedDate = typeof req.query.date === "string" ? toMySQLDate(req.query.date) : null;
+    if (!selectedDate) {
+      res.json({ users: rows });
+      return;
+    }
+    const [statuses] = await pool.query<RowDataPacket[]>(
+      `SELECT u.id, COALESCE(
+          (SELECT a.attendanceStatus FROM attendance a
+           WHERE a.userId = u.id AND a.date = ? AND a.status = 'Y'
+             AND a.attendanceStatus IS NOT NULL
+           ORDER BY a.id DESC LIMIT 1),
+          (SELECT CONCAT('Leave (', l.leaveStatus, ')') FROM leaves l
+           WHERE l.userId = u.id AND ? BETWEEN l.fromDate AND l.toDate
+             AND l.status = 'Y' AND l.leaveStatus IN ('Approved', 'Pending')
+           ORDER BY FIELD(l.leaveStatus, 'Approved', 'Pending') LIMIT 1),
+          (SELECT 'Remote Work' FROM attendance r
+           WHERE r.userId = u.id AND r.remoteStatus = 'Approved'
+             AND r.remoteFromDate <= ? AND r.remoteToDate >= ?
+             AND r.status = 'Y' LIMIT 1),
+          'No attendance'
+        ) AS attendanceCurrentStatus
+       FROM tbl_users u WHERE LOWER(u.role) = 'user'`,
+      [selectedDate, selectedDate, selectedDate, selectedDate]
+    );
+    const byId = new Map(statuses.map((row) => [Number(row.id), row.attendanceCurrentStatus]));
+    res.json({ users: rows.map((row) => ({
+      ...row,
+      attendanceCurrentStatus: byId.get(Number(row.id)) || "No attendance"
+    })) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Failed to fetch users." });
@@ -107,6 +157,7 @@ export const getAllAttendances = async (req: Request, res: Response) => {
        FROM attendance a
        JOIN tbl_users u ON a.userId = u.id
        WHERE a.status = 'Y'
+         AND DATE(a.date) >= COALESCE(DATE(u.date), DATE(u.created_at))
        ORDER BY a.date ASC, a.id ASC`,
     );
 
@@ -156,6 +207,7 @@ export const getMyAttendances = async (
        FROM attendance a
        JOIN tbl_users u ON a.userId = u.id
        WHERE a.userId = ? AND a.status = 'Y'
+         AND DATE(a.date) >= COALESCE(DATE(u.date), DATE(u.created_at))
        ORDER BY a.date ASC, a.id ASC`,
       [userId],
     );
@@ -303,6 +355,18 @@ export const addAttendance = async (
     console.log(`📊 Final status before INSERT: ${finalStatus}`);
 
     // ✅ Insert attendance
+    const approvedLeave = await findConflictingApprovedLeave(
+      userIdNum, formattedDate, manualStatus);
+    if (approvedLeave) {
+      res.status(409).json({
+        success: false,
+        code: "APPROVED_LEAVE_REQUIRES_REJECTION",
+        leaveId: approvedLeave.id,
+        message: "Reject the approved leave request before changing attendance status.",
+      });
+      return;
+    }
+
     console.log("📝 Inserting attendance record...");
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO attendance 
@@ -447,6 +511,10 @@ export const addAttendance = async (
     console.log("🚀 ========== ADD ATTENDANCE END ==========");
     console.log(`✅ Final response: Success, ID: ${result.insertId}, Status: ${finalStatus}`);
 
+    await nonCriticalNotification(() => adminAttendanceRecorded(
+      userIdNum, result.insertId, formattedDate, finalStatus, clockIn, clockOut
+    ));
+
     res.status(201).json({
       success: true,
       message: "Attendance added successfully",
@@ -501,9 +569,27 @@ export const getAttendanceByUserAndDate = async (
     );
 
     if (rows.length === 0) {
-      res.status(404).json({
-        success: false,
-        message: "No attendance found for this user on this date"
+      const [leaveRows] = await pool.query<RowDataPacket[]>(
+        `SELECT leaveStatus FROM leaves
+         WHERE userId = ? AND ? BETWEEN fromDate AND toDate
+           AND status = 'Y' AND leaveStatus IN ('Approved', 'Pending')
+         ORDER BY FIELD(leaveStatus, 'Approved', 'Pending') LIMIT 1`,
+        [userId, formattedDate]
+      );
+      const [remoteRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM attendance
+         WHERE userId = ? AND remoteStatus = 'Approved'
+           AND remoteFromDate <= ? AND remoteToDate >= ?
+           AND status = 'Y' LIMIT 1`,
+        [userId, formattedDate, formattedDate]
+      );
+      res.json({
+        success: true,
+        data: null,
+        cycles: [],
+        currentStatus: leaveRows.length
+          ? `Leave (${leaveRows[0].leaveStatus})`
+          : remoteRows.length ? "Remote Work" : "No attendance"
       });
       return;
     }
@@ -577,7 +663,7 @@ export const updateAttendance = async (
 
     // ✅ Check if attendance exists
     const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id, userId FROM attendance WHERE id = ? AND status = 'Y'",
+      "SELECT * FROM attendance WHERE id = ? AND status = 'Y'",
       [id]
     );
 
@@ -595,7 +681,7 @@ export const updateAttendance = async (
     let workingHours = null;
 
     // ✅ Determine if this status requires time
-    const requiresTime = ["present", "late", "half leave", "short leave"].includes(finalStatus);
+    const requiresTime = ["present", "late", "half leave", "short leave", "present (remote)", "late (remote)"].includes(finalStatus);
 
     // ✅ CLOCK IN validation (REQUIRED for present/late/half leave)
     if (requiresTime && !clockIn) {
@@ -634,6 +720,18 @@ export const updateAttendance = async (
     }
 
     // ✅ Update with remote fields - clockOut can be null
+    const approvedLeave = await findConflictingApprovedLeave(
+      Number(userId), formattedDate, reqStatus);
+    if (approvedLeave) {
+      res.status(409).json({
+        success: false,
+        code: "APPROVED_LEAVE_REQUIRES_REJECTION",
+        leaveId: approvedLeave.id,
+        message: "Reject the approved leave request before changing attendance status.",
+      });
+      return;
+    }
+
     await pool.query<ResultSetHeader>(
       `UPDATE attendance
        SET userId = ?,
@@ -659,15 +757,15 @@ export const updateAttendance = async (
         clockOut || null, // ✅ Allow null
         finalStatus,
         workingHours,
-        type || 'Onsite',
-        remoteStatus || null,
-        remoteApprovedBy || null,
-        remoteApprovedAt || null,
-        remoteRejectedReason || null,
-        remoteRequestDate || null,
-        remoteFromDate || null,
-        remoteToDate || null,
-        remoteReason || null,
+        type !== undefined ? type : existing[0].type,
+        remoteStatus !== undefined ? remoteStatus : existing[0].remoteStatus,
+        remoteApprovedBy !== undefined ? remoteApprovedBy : existing[0].remoteApprovedBy,
+        remoteApprovedAt !== undefined ? remoteApprovedAt : existing[0].remoteApprovedAt,
+        remoteRejectedReason !== undefined ? remoteRejectedReason : existing[0].remoteRejectedReason,
+        remoteRequestDate !== undefined ? remoteRequestDate : existing[0].remoteRequestDate,
+        remoteFromDate !== undefined ? remoteFromDate : existing[0].remoteFromDate,
+        remoteToDate !== undefined ? remoteToDate : existing[0].remoteToDate,
+        remoteReason !== undefined ? remoteReason : existing[0].remoteReason,
         id,
       ],
     );
