@@ -30,7 +30,7 @@ async function main() {
   try {
     delete process.env.SMTP_HOST;
     process.env.SMTP_FROM_EMAIL = "MyDesk <mydesk@example.invalid>";
-    await queueEmail("employee@example.invalid","Attendance Clock In","Hello Employee, clock in at 09:05.","/users/attendance",key);
+    await queueEmail("employee@example.invalid","Test notification","Hello Employee, this is a test email.","/users/attendance",key);
     let rows: any[] = [];
     for (let attempt=0; attempt<50; attempt++) {
       [rows] = await pool.query<any[]>("SELECT id,status,attempts FROM notification_email_outbox WHERE dedupeKey=?",[key]);
@@ -49,8 +49,8 @@ async function main() {
     assert.equal(sent[0].status,"sent");
     assert.equal(messages.length,1);
     assert(messages[0].includes("MyDesk"));
-    assert(sent[0].bodyHtml.includes("clock in at 09:05"));
-    await queueEmail("employee@example.invalid","Attendance Clock In","Again","/users/attendance",key);
+    assert(sent[0].bodyHtml.includes("this is a test email"));
+    await queueEmail("employee@example.invalid","Test notification","Again","/users/attendance",key);
     await new Promise((resolve) => setTimeout(resolve,50));
     assert.equal(messages.length,1,"duplicate event must not send again");
     console.log("Local SMTP failure, retry, branded delivery, and email deduplication passed");

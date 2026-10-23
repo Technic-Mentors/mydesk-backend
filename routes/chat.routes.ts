@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router, Response } from "express";
 import asyncHandler from "express-async-handler";
 import multer from "multer";
@@ -5,6 +6,8 @@ import pool from "../database/db";
 import { authenticateToken, AuthenticatedRequest } from "../middleware/middleware";
 import { notifyUser } from "../services/notificationService";
 import { readChatFile, removeChatFile, writeChatFile } from "../services/chatFiles";
+import { deleteChatConversation } from "../services/deleteChatConversation";
+import { isAdministrator } from "../permissionModel";
 
 const router = Router();
 router.use(authenticateToken);
@@ -84,6 +87,7 @@ router.patch("/conversations/:id/preferences", handle(async (req: AuthenticatedR
 
 router.post("/conversations", handle(async (req: AuthenticatedRequest, res) => {
   const group = req.body?.type === "group";
+  if (group && !isAdministrator(req.user)) return fail(res, 403, "Only system administrators can create groups");
   const others = [...new Set((Array.isArray(req.body?.userIds) ? req.body.userIds : []).map(id).filter((n: number) => n && n !== me(req)))];
   if (others.length < (group ? 2 : 1) || (!group && others.length !== 1) || others.length > 49) return fail(res, 400, "Select valid participants");
   const [users]: any = await pool.query("SELECT id,role FROM tbl_users WHERE id IN (?) AND status='Active' AND loginStatus='Y'", [others]);
@@ -100,13 +104,30 @@ router.post("/conversations", handle(async (req: AuthenticatedRequest, res) => {
     if (existing.length) return res.json({ id: existing[0].id });
   }
   const conn = await pool.getConnection();
+  let chatId = 0;
   try {
     await conn.beginTransaction();
     const [result]: any = await conn.query("INSERT INTO chat_conversations (type,name,created_by) VALUES (?,?,?)", [group ? "group" : "direct", group ? name : null, me(req)]);
-    for (const userId of [me(req), ...others]) await conn.query("INSERT INTO chat_participants (conversation_id,user_id,is_admin) VALUES (?,?,?)", [result.insertId, userId, userId === me(req)]);
+    chatId = Number(result.insertId);
+    for (const userId of [me(req), ...others]) await conn.query("INSERT INTO chat_participants (conversation_id,user_id,is_admin) VALUES (?,?,?)", [chatId, userId, userId === me(req)]);
     await conn.commit();
-    res.status(201).json({ id: result.insertId });
   } catch (error) { await conn.rollback(); throw error; } finally { conn.release(); }
+  if (group) {
+    const recipients = [me(req), ...others.map((value) => Number(value))];
+    const notices = await Promise.allSettled(recipients.map((userId) => notifyUser(userId, {
+      title: "Added to a chat group",
+      message: `You are a member of ${name}.`,
+      type: "chat",
+      module: "Chat",
+      referenceId: chatId,
+      targetUrl: `/chat?conversationId=${chatId}`,
+      dedupeKey: `chat-group:${chatId}:u${userId}`,
+    })));
+    notices.forEach((notice) => {
+      if (notice.status === "rejected") console.error("Group notification failed:", notice.reason);
+    });
+  }
+  res.status(201).json({ id: chatId });
 }));
 
 router.patch("/conversations/:id", handle(async (req: AuthenticatedRequest, res) => {
@@ -151,13 +172,18 @@ router.delete("/conversations/:id/group", handle(async (req: AuthenticatedReques
   const participant = await member(conversationId, me(req));
   const [groups]: any = await pool.query("SELECT type FROM chat_conversations WHERE id=?", [conversationId]);
   if (!participant?.is_admin || groups[0]?.type !== "group") return fail(res, 403, "Group unavailable");
-  const [files]: any = await pool.query("SELECT file_path FROM chat_messages WHERE conversation_id=? AND file_path IS NOT NULL", [conversationId]);
-  await pool.query("DELETE FROM chat_conversations WHERE id=?", [conversationId]);
-  const removed = await Promise.allSettled(files.map((file: { file_path: string }) => removeChatFile(file.file_path)));
-  removed.forEach((result) => { if (result.status === "rejected") console.error("Could not remove chat file:", result.reason); });
+  await deleteChatConversation(conversationId);
   res.json({ ok: true });
 }));
 
+router.delete("/conversations/:id", handle(async (req: AuthenticatedRequest, res) => {
+  const conversationId = id(req.params.id);
+  const participant = await member(conversationId, me(req));
+  const [chats]: any = await pool.query("SELECT type FROM chat_conversations WHERE id=?", [conversationId]);
+  if (!participant || chats[0]?.type !== "direct") return fail(res, 403, "Direct chat unavailable");
+  await deleteChatConversation(conversationId);
+  res.json({ ok: true });
+}));
 router.get("/conversations/:id/messages", handle(async (req: AuthenticatedRequest, res) => {
   const conversationId = id(req.params.id);
   if (!await member(conversationId, me(req))) return fail(res, 403, "Conversation unavailable");
@@ -333,6 +359,24 @@ router.put("/messages/:id/reactions", handle(async (req: AuthenticatedRequest, r
   if (!['👍','❤️','😂','😮','😢','🎉'].includes(emoji)) return fail(res, 400, "Invalid reaction");
   const [found]: any = await pool.query("SELECT 1 FROM chat_reactions WHERE message_id=? AND user_id=? AND emoji=?", [item.id, me(req), emoji]);
   await pool.query(found.length ? "DELETE FROM chat_reactions WHERE message_id=? AND user_id=? AND emoji=?" : "INSERT INTO chat_reactions (message_id,user_id,emoji) VALUES (?,?,?)", [item.id, me(req), emoji]);
+  if (!found.length && Number(item.sender_id) !== me(req)) {
+    const [recipients]: any = await pool.query(`SELECT user_id FROM chat_participants
+      WHERE conversation_id=? AND user_id=? AND muted=0 AND cleared_id<?`,
+      [item.conversation_id, item.sender_id, item.id]);
+    if (recipients.length) {
+      try {
+        await notifyUser(Number(item.sender_id), {
+          title: `${req.user!.name} reacted ${emoji} to your message`,
+          message: (item.content || item.file_name || "Attachment").slice(0, 120),
+          type: "chat",
+          module: "Chat",
+          referenceId: Number(item.conversation_id),
+          targetUrl: `/chat?conversationId=${item.conversation_id}&messageId=${item.id}`,
+          dedupeKey: `chat-reaction:${item.id}:u${me(req)}:${randomUUID()}`,
+        });
+      } catch (error) { console.error("Chat reaction notification failed:", error); }
+    }
+  }
   res.json({ reacted: !found.length });
 }));
 

@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import { projectChangeEvent, projectStatusEvent } from "../services/projectTodoEvents";
 import { nonCriticalNotification } from "../services/notificationEvents";
-import { syncProjectChatSafely } from "../services/chatProjects";
+import { syncProjectChat, syncProjectChatSafely } from "../services/chatProjects";
 
 export const getAllProjects = async (
   req: Request,
@@ -51,7 +51,15 @@ export const getProjectById = async (req: Request, res: Response): Promise<void>
       res.status(404).json({ message: "Project not found" });
       return;
     }
-    res.json(rows[0]);
+    const [assignees]: any = await pool.query(
+      `SELECT DISTINCT u.id, u.name, u.image
+       FROM assignedprojects ap
+       JOIN tbl_users u ON u.id = ap.employee_id
+       WHERE ap.projectId = ? AND ap.assignStatus = 'Y' AND u.status = 'Active'
+       ORDER BY u.name ASC`,
+      [id],
+    );
+    res.json({ ...rows[0], assignees });
   } catch (error) {
     console.error("Error fetching project:", error);
     res.status(500).json({ message: "Failed to fetch project" });
@@ -74,7 +82,11 @@ export const addProject = async (
 
     const safeEndDate = endDate ? endDate : null;
 
-    if (!projectName || !projectCategory || !startDate) {
+    if (typeof projectName !== "string" || !projectName.trim()) {
+      res.status(400).json({ message: "Project name is required" });
+      return;
+    }
+    if (!projectCategory || !startDate) {
       res.status(400).json({ message: "Required fields are missing" });
       return;
     }
@@ -151,7 +163,11 @@ export const updateProject = async (
 
     const safeEndDate = endDate ? endDate : null;
 
-    if (!projectName || !projectCategory || !startDate) {
+    if (typeof projectName !== "string" || !projectName.trim()) {
+      res.status(400).json({ message: "Project name is required" });
+      return;
+    }
+    if (!projectCategory || !startDate) {
       res.status(400).json({ message: "Required fields are missing" });
       return;
     }
@@ -199,7 +215,8 @@ export const updateProject = async (
     const previous = previousRows[0];
     const nextStatus = completionStatus || previous.completionStatus;
     const nextDeadline = deadlineDate || null;
-    if (nextStatus === "Working" && (!nextDeadline || new Date(nextDeadline) < new Date(startDate))) {
+    if (nextStatus === "Working" && ((safeEndDate && !nextDeadline) ||
+        (nextDeadline && new Date(nextDeadline) < new Date(startDate)))) {
       res.status(400).json({ message: "A deadline on or after the start date is required for a working project" });
       return;
     }
@@ -258,7 +275,7 @@ export const updateProject = async (
     id,
   ],
 );
-    await syncProjectChatSafely(Number(id), (req as any).user?.id);
+    await syncProjectChat(Number(id), (req as any).user?.id);
 
     if (changes.length) {
       await nonCriticalNotification(() => projectChangeEvent(Number(id), changes, (req as any).user?.id));
@@ -307,7 +324,7 @@ export const updateCompletionStatus = async (
     }
 
     const [previousRows]: any = await pool.query(
-      "SELECT completionStatus, projectName, projectCategory, startDate, endDate, deadlineDate " +
+      "SELECT completionStatus, projectName, projectCategory, startDate, endDate, deadlineDate, isOnGoing " +
       "FROM projects WHERE id=? AND projectStatus='Y'", [id]);
     if (!previousRows.length) {
       res.status(404).json({ message: "Project not found" });
@@ -319,8 +336,8 @@ export const updateCompletionStatus = async (
       res.status(400).json({ message: "Complete valid project details before changing status" });
       return;
     }
-    if (completionStatus === "Working" && (!project.deadlineDate ||
-        new Date(project.deadlineDate) < new Date(project.startDate))) {
+    if (completionStatus === "Working" && ((!Number(project.isOnGoing) && !project.deadlineDate) ||
+        (project.deadlineDate && new Date(project.deadlineDate) < new Date(project.startDate)))) {
       res.status(400).json({ message: "Set a deadline on or after the start date before moving this project to Working" });
       return;
     }
@@ -334,6 +351,8 @@ export const updateCompletionStatus = async (
       res.status(404).json({ message: "Project not found" });
       return;
     }
+
+    await syncProjectChat(Number(id), (req as any).user?.id);
 
     if (previousRows.length && previousRows[0].completionStatus !== completionStatus) {
       await nonCriticalNotification(() => projectStatusEvent(Number(id),previousRows[0].completionStatus || "New",completionStatus,(req as any).user?.id));
@@ -361,7 +380,7 @@ export const deleteProject = async (
       `,
       [id],
     );
-    await syncProjectChatSafely(Number(id), (req as any).user?.id);
+    await syncProjectChat(Number(id), (req as any).user?.id);
 
     res.status(200).json({ message: "Project deleted successfully" });
   } catch (error) {

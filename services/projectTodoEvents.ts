@@ -131,26 +131,3 @@ export async function processOverdueTodos(today: string, onlyTodoId?: number): P
     for (const result of results) if (result.status === "rejected") console.error("Overdue Todo notification failed:",result.reason);
   }
 }
-
-export async function progressSubmittedEvent(progressId: number, employeeId: number): Promise<void> {
-  const [rows]: any = await pool.query(
-    "SELECT u.name AS employeeName,p.projectName,DATE_FORMAT(pr.date,'%Y-%m-%d') AS progressDate " +
-    "FROM progress pr JOIN tbl_users u ON u.id=pr.employee_id " +
-    "JOIN projects p ON p.id=pr.projectId WHERE pr.id=? AND pr.employee_id=?",
-    [progressId,employeeId],
-  );
-  if (!rows.length) return;
-  const recipients = (await adminRecipients(MODULE.Performance)).filter((admin) => admin.id !== employeeId);
-  const title = "Employee progress submitted";
-  const message = `${rows[0].employeeName} added progress for "${rows[0].projectName}" on ${rows[0].progressDate}.`;
-  const targetUrl = `/performance?tab=PROGRESS&viewId=${progressId}`;
-  const key = `progress:${progressId}:submitted`;
-  const deliveries = recipients.flatMap((admin) => [
-    notifyUser(admin.id,{title,message,type:"progress",module:MODULE.Performance,
-      referenceId:progressId,targetUrl,dedupeKey:`${key}:u${admin.id}`}),
-    queueEmail(admin.email,title,`Hello ${admin.name}, ${message}`,targetUrl,`${key}:email:u${admin.id}`),
-  ]);
-  const results = await Promise.allSettled(deliveries);
-  for (const result of results) if (result.status === "rejected")
-    console.error("Progress submission notification failed:",result.reason);
-}

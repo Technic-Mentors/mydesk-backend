@@ -1,0 +1,726 @@
+-- MyDesk manual phpMyAdmin SQL, MySQL 8.x.
+-- Take a full backup first. Select the intended MyDesk database.
+-- Copy ONE numbered SQL statement at a time into phpMyAdmin > SQL > Go.
+-- Do not import this whole TXT file. MySQL ALTER TABLE commits immediately.
+-- For ADD steps: if the check shows the column/index already exists, SKIP.
+-- For UNIQUE steps: if the duplicate check returns rows, SKIP.
+-- If an existing table has a different structure, STOP and review it.
+-- Do not also run older MyDesk migration files. No data is deleted here.
+
+-- =========================================================
+-- STEP 1 - Confirm selected database
+-- =========================================================
+-- STOP unless selected_database is the intended MyDesk database.
+SELECT DATABASE() AS selected_database, VERSION() AS mysql_version;
+
+-- =========================================================
+-- STEP 2 - Check legacy base tables
+-- =========================================================
+-- All seven named tables must appear. Otherwise STOP.
+SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('tbl_users','notifications','assignedprojects','calendarsession','salarycycle','modules','access_control') ORDER BY TABLE_NAME;
+
+-- NEW TABLES: run the following CREATE statements in order, one at a time.
+-- =========================================================
+-- STEP 3 - Create password_reset_tokens
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_password_reset_token_hash (token_hash),
+  KEY idx_password_reset_user (user_id, used_at)
+);
+
+-- =========================================================
+-- STEP 4 - Create password_reset_rate_limits
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS password_reset_rate_limits (
+  scope_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  window_started_at DATETIME NOT NULL,
+  attempts INT UNSIGNED NOT NULL
+);
+
+-- =========================================================
+-- STEP 5 - Create notification_email_outbox
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS notification_email_outbox (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  dedupeKey VARCHAR(190) NOT NULL UNIQUE,
+  recipient VARCHAR(255) NOT NULL,
+  subject VARCHAR(255) NOT NULL,
+  bodyHtml MEDIUMTEXT NOT NULL,
+  status ENUM('pending','sent','failed') NOT NULL DEFAULT 'pending',
+  attempts INT NOT NULL DEFAULT 0,
+  lastError VARCHAR(500) NULL,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  sentAt DATETIME NULL
+);
+
+-- =========================================================
+-- STEP 6 - Create notification_dismissals
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS notification_dismissals (
+  userId INT NOT NULL,
+  dismissalKey VARCHAR(255) NOT NULL,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (userId, dismissalKey)
+);
+
+-- =========================================================
+-- STEP 7 - Create chat_conversations
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  type ENUM('direct','group','project') NOT NULL,
+  name VARCHAR(120) NULL,
+  project_id INT NULL UNIQUE,
+  created_by INT NOT NULL,
+  archived_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_chat_created (created_at)
+);
+
+-- =========================================================
+-- STEP 8 - Create chat_participants
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_participants (
+  conversation_id BIGINT NOT NULL,
+  user_id INT NOT NULL,
+  is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  pinned_at DATETIME NULL,
+  muted BOOLEAN NOT NULL DEFAULT FALSE,
+  read_id BIGINT NOT NULL DEFAULT 0,
+  delivered_id BIGINT NOT NULL DEFAULT 0,
+  cleared_id BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id,user_id),
+  KEY idx_chat_user (user_id,conversation_id),
+  FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+);
+
+-- =========================================================
+-- STEP 9 - Create chat_messages
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT NOT NULL,
+  sender_id INT NOT NULL,
+  content TEXT NULL,
+  reply_to_id BIGINT NULL,
+  file_name VARCHAR(255) NULL,
+  file_type VARCHAR(120) NULL,
+  file_size BIGINT NULL,
+  file_path VARCHAR(255) NULL,
+  pinned_at DATETIME NULL,
+  edited_at DATETIME NULL,
+  deleted_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_chat_messages (conversation_id,id),
+  FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+);
+
+-- =========================================================
+-- STEP 10 - Create chat_reactions
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_reactions (
+  message_id BIGINT NOT NULL,
+  user_id INT NOT NULL,
+  emoji VARCHAR(16) NOT NULL,
+  PRIMARY KEY (message_id,user_id,emoji),
+  FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+);
+
+-- =========================================================
+-- STEP 11 - Create chat_files
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_files (
+  message_id BIGINT NOT NULL PRIMARY KEY,
+  data LONGBLOB NOT NULL,
+  FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+);
+
+-- =========================================================
+-- STEP 12 - Create chat_typing
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_typing (
+  conversation_id BIGINT NOT NULL,
+  user_id INT NOT NULL,
+  expires_at DATETIME NOT NULL,
+  PRIMARY KEY (conversation_id,user_id),
+  FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+);
+
+-- =========================================================
+-- STEP 13 - Create chat_presence
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS chat_presence (
+  user_id INT NOT NULL PRIMARY KEY,
+  last_seen DATETIME NOT NULL
+);
+
+-- =========================================================
+-- STEP 14 - Create project_files
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS project_files (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  project_id INT NOT NULL,
+  original_name VARCHAR(255) NOT NULL,
+  stored_name VARCHAR(255) NOT NULL,
+  mime_type VARCHAR(255) NOT NULL,
+  size_bytes BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_project_files_project_id (project_id)
+);
+
+-- =========================================================
+-- STEP 15 - Create payroll_processing_settings
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS payroll_processing_settings (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  rule_mode ENUM('AFTER_MONTH_END','AFTER_CUTOFF') NOT NULL DEFAULT 'AFTER_MONTH_END',
+  cutoff_day TINYINT UNSIGNED NOT NULL DEFAULT 25,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_payroll_cutoff_day CHECK (cutoff_day BETWEEN 1 AND 31)
+);
+
+-- =========================================================
+-- STEP 16 - Create payroll_run_items
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS payroll_run_items (
+  calendar_session_id INT NOT NULL,
+  employee_id INT NOT NULL,
+  salary_config_id INT NOT NULL,
+  paid_days DECIMAL(6,2) NOT NULL,
+  gross_salary DECIMAL(14,2) NOT NULL,
+  loan_deduction DECIMAL(14,2) NOT NULL,
+  overtime_amount DECIMAL(14,2) NOT NULL DEFAULT 0,
+  net_salary DECIMAL(14,2) NOT NULL,
+  scheduled_basic DECIMAL(14,2) NULL,
+  scheduled_allowances DECIMAL(14,2) NULL,
+  absence_deduction DECIMAL(14,2) NULL,
+  working_days DECIMAL(6,2) NULL,
+  overtime_hours DECIMAL(8,2) NULL,
+  loan_balance_after DECIMAL(14,2) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (calendar_session_id, employee_id),
+  KEY idx_payroll_employee (employee_id)
+);
+
+-- =========================================================
+-- STEP 17 - Create payroll_documents
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS payroll_documents (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  salary_cycle_id INT NOT NULL,
+  employee_id INT NULL,
+  document_key VARCHAR(50) NOT NULL,
+  generated_at DATETIME NULL,
+  email_status ENUM('Pending','Sending','Sent','Failed','Skipped') NOT NULL DEFAULT 'Pending',
+  email_sent_at DATETIME NULL,
+  email_error VARCHAR(500) NULL,
+  email_attempts INT NOT NULL DEFAULT 0,
+  email_claimed_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_payroll_document (salary_cycle_id,document_key),
+  KEY idx_payroll_document_employee (employee_id,salary_cycle_id)
+);
+
+-- =========================================================
+-- STEP 18 - Create payroll_admin_deliveries
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS payroll_admin_deliveries (
+  salary_cycle_id INT NOT NULL,
+  recipient_id INT NOT NULL,
+  status ENUM('Pending','Sending','Sent','Failed') NOT NULL DEFAULT 'Pending',
+  sent_at DATETIME NULL,
+  error VARCHAR(500) NULL,
+  attempts INT NOT NULL DEFAULT 0,
+  claimed_at DATETIME NULL,
+  PRIMARY KEY (salary_cycle_id,recipient_id)
+);
+
+-- =========================================================
+-- STEP 19 - Create attendance_mobile_settings
+-- =========================================================
+-- If already present, inspect its structure. IF NOT EXISTS preserves existing rows but cannot repair a partial table.
+CREATE TABLE IF NOT EXISTS attendance_mobile_settings (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  allowClockIn TINYINT(1) NOT NULL DEFAULT 1,
+  allowClockOut TINYINT(1) NOT NULL DEFAULT 1
+);
+
+-- EXISTING COLUMNS: use each check to decide which following ADD steps to skip.
+-- =========================================================
+-- STEP 20 - Check employee columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tbl_users' AND COLUMN_NAME IN ('auth_version','must_change_password','department','reporting_manager') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 21 - Add tbl_users.auth_version
+-- =========================================================
+-- Run ONLY if auth_version was absent from the preceding column check.
+ALTER TABLE tbl_users ADD COLUMN auth_version INT UNSIGNED NOT NULL DEFAULT 0;
+
+-- =========================================================
+-- STEP 22 - Add tbl_users.must_change_password
+-- =========================================================
+-- Run ONLY if must_change_password was absent from the preceding column check.
+ALTER TABLE tbl_users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- =========================================================
+-- STEP 23 - Add tbl_users.department
+-- =========================================================
+-- Run ONLY if department was absent from the preceding column check.
+ALTER TABLE tbl_users ADD COLUMN department VARCHAR(120) NULL;
+
+-- =========================================================
+-- STEP 24 - Add tbl_users.reporting_manager
+-- =========================================================
+-- Run ONLY if reporting_manager was absent from the preceding column check.
+ALTER TABLE tbl_users ADD COLUMN reporting_manager VARCHAR(120) NULL;
+
+-- =========================================================
+-- STEP 25 - Check notification columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='notifications' AND COLUMN_NAME IN ('message','recipientRole','title','module','targetUrl','readAt','dedupeKey') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 26 - Widen notifications.message to nullable TEXT
+-- =========================================================
+-- Run ONLY if message is CHAR/VARCHAR/TINYTEXT or TEXT NOT NULL. Skip if already nullable TEXT or wider.
+ALTER TABLE notifications MODIFY COLUMN message TEXT NULL;
+
+-- =========================================================
+-- STEP 27 - Add notifications.recipientRole
+-- =========================================================
+-- Run ONLY if recipientRole was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN recipientRole VARCHAR(80) NULL;
+
+-- =========================================================
+-- STEP 28 - Add notifications.title
+-- =========================================================
+-- Run ONLY if title was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN title VARCHAR(160) NULL;
+
+-- =========================================================
+-- STEP 29 - Add notifications.module
+-- =========================================================
+-- Run ONLY if module was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN module VARCHAR(80) NULL;
+
+-- =========================================================
+-- STEP 30 - Add notifications.targetUrl
+-- =========================================================
+-- Run ONLY if targetUrl was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN targetUrl VARCHAR(500) NULL;
+
+-- =========================================================
+-- STEP 31 - Add notifications.readAt
+-- =========================================================
+-- Run ONLY if readAt was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN readAt DATETIME NULL;
+
+-- =========================================================
+-- STEP 32 - Add notifications.dedupeKey
+-- =========================================================
+-- Run ONLY if dedupeKey was absent from the preceding column check.
+ALTER TABLE notifications ADD COLUMN dedupeKey VARCHAR(190) NULL;
+
+-- =========================================================
+-- STEP 33 - Check assignment columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='assignedprojects' AND COLUMN_NAME IN ('assigned_by') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 34 - Add assignedprojects.assigned_by
+-- =========================================================
+-- Run ONLY if assigned_by was absent from the preceding column check.
+ALTER TABLE assignedprojects ADD COLUMN assigned_by INT NULL AFTER assignStatus;
+
+-- =========================================================
+-- STEP 35 - Check chat conversation columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations' AND COLUMN_NAME IN ('project_id','archived_at') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 36 - Add chat_conversations.project_id
+-- =========================================================
+-- Run ONLY if project_id was absent from the preceding column check.
+ALTER TABLE chat_conversations ADD COLUMN project_id INT NULL;
+
+-- =========================================================
+-- STEP 37 - Add chat_conversations.archived_at
+-- =========================================================
+-- Run ONLY if archived_at was absent from the preceding column check.
+ALTER TABLE chat_conversations ADD COLUMN archived_at DATETIME NULL;
+
+-- =========================================================
+-- STEP 38 - Check chat participant columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_participants' AND COLUMN_NAME IN ('pinned_at','muted','read_id','delivered_id','cleared_id') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 39 - Add chat_participants.pinned_at
+-- =========================================================
+-- Run ONLY if pinned_at was absent from the preceding column check.
+ALTER TABLE chat_participants ADD COLUMN pinned_at DATETIME NULL;
+
+-- =========================================================
+-- STEP 40 - Add chat_participants.muted
+-- =========================================================
+-- Run ONLY if muted was absent from the preceding column check.
+ALTER TABLE chat_participants ADD COLUMN muted BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- =========================================================
+-- STEP 41 - Add chat_participants.read_id
+-- =========================================================
+-- Run ONLY if read_id was absent from the preceding column check.
+ALTER TABLE chat_participants ADD COLUMN read_id BIGINT NOT NULL DEFAULT 0;
+
+-- =========================================================
+-- STEP 42 - Add chat_participants.delivered_id
+-- =========================================================
+-- Run ONLY if delivered_id was absent from the preceding column check.
+ALTER TABLE chat_participants ADD COLUMN delivered_id BIGINT NOT NULL DEFAULT 0;
+
+-- =========================================================
+-- STEP 43 - Add chat_participants.cleared_id
+-- =========================================================
+-- Run ONLY if cleared_id was absent from the preceding column check.
+ALTER TABLE chat_participants ADD COLUMN cleared_id BIGINT NOT NULL DEFAULT 0;
+
+-- =========================================================
+-- STEP 44 - Check chat message columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_messages' AND COLUMN_NAME IN ('reply_to_id','file_size','file_path','pinned_at','edited_at','deleted_at') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 45 - Add chat_messages.reply_to_id
+-- =========================================================
+-- Run ONLY if reply_to_id was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN reply_to_id BIGINT NULL;
+
+-- =========================================================
+-- STEP 46 - Add chat_messages.file_size
+-- =========================================================
+-- Run ONLY if file_size was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN file_size BIGINT NULL;
+
+-- =========================================================
+-- STEP 47 - Add chat_messages.file_path
+-- =========================================================
+-- Run ONLY if file_path was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN file_path VARCHAR(255) NULL;
+
+-- =========================================================
+-- STEP 48 - Add chat_messages.pinned_at
+-- =========================================================
+-- Run ONLY if pinned_at was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN pinned_at DATETIME NULL;
+
+-- =========================================================
+-- STEP 49 - Add chat_messages.edited_at
+-- =========================================================
+-- Run ONLY if edited_at was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN edited_at DATETIME NULL;
+
+-- =========================================================
+-- STEP 50 - Add chat_messages.deleted_at
+-- =========================================================
+-- Run ONLY if deleted_at was absent from the preceding column check.
+ALTER TABLE chat_messages ADD COLUMN deleted_at DATETIME NULL;
+
+-- =========================================================
+-- STEP 51 - Check payroll run item columns
+-- =========================================================
+-- Returned columns already exist; add only missing names.
+SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='payroll_run_items' AND COLUMN_NAME IN ('scheduled_basic','scheduled_allowances','absence_deduction','working_days','overtime_hours','loan_balance_after') ORDER BY ORDINAL_POSITION;
+
+-- =========================================================
+-- STEP 52 - Add payroll_run_items.scheduled_basic
+-- =========================================================
+-- Run ONLY if scheduled_basic was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN scheduled_basic DECIMAL(14,2) NULL;
+
+-- =========================================================
+-- STEP 53 - Add payroll_run_items.scheduled_allowances
+-- =========================================================
+-- Run ONLY if scheduled_allowances was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN scheduled_allowances DECIMAL(14,2) NULL;
+
+-- =========================================================
+-- STEP 54 - Add payroll_run_items.absence_deduction
+-- =========================================================
+-- Run ONLY if absence_deduction was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN absence_deduction DECIMAL(14,2) NULL;
+
+-- =========================================================
+-- STEP 55 - Add payroll_run_items.working_days
+-- =========================================================
+-- Run ONLY if working_days was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN working_days DECIMAL(6,2) NULL;
+
+-- =========================================================
+-- STEP 56 - Add payroll_run_items.overtime_hours
+-- =========================================================
+-- Run ONLY if overtime_hours was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN overtime_hours DECIMAL(8,2) NULL;
+
+-- =========================================================
+-- STEP 57 - Add payroll_run_items.loan_balance_after
+-- =========================================================
+-- Run ONLY if loan_balance_after was absent from the preceding column check.
+ALTER TABLE payroll_run_items ADD COLUMN loan_balance_after DECIMAL(14,2) NULL;
+
+-- =========================================================
+-- STEP 58 - Check chat conversation type
+-- =========================================================
+-- Only the exact value enum('direct','group') permits the next MODIFY.
+SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations' AND COLUMN_NAME='type';
+
+-- =========================================================
+-- STEP 59 - Add project conversation type
+-- =========================================================
+-- Run ONLY for exact enum('direct','group'); otherwise STOP and preserve existing options.
+ALTER TABLE chat_conversations MODIFY COLUMN type ENUM('direct','group','project') NOT NULL;
+
+-- INDEXES: check index columns and order, including equivalent differently named keys.
+-- =========================================================
+-- STEP 60 - Check existing relevant indexes
+-- =========================================================
+-- Skip an ADD KEY if an equivalent key already exists.
+SELECT TABLE_NAME,INDEX_NAME,NON_UNIQUE,COLUMN_NAME,SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('notifications','calendarsession','salarycycle','chat_conversations','chat_participants','chat_messages','project_files','payroll_run_items','payroll_documents') ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX;
+
+-- =========================================================
+-- STEP 61 - Add notifications.idx_notification_user_date index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE notifications ADD KEY idx_notification_user_date (userId,createdAt);
+
+-- =========================================================
+-- STEP 62 - Add chat_conversations.idx_chat_created index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE chat_conversations ADD KEY idx_chat_created (created_at);
+
+-- =========================================================
+-- STEP 63 - Add chat_participants.idx_chat_user index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE chat_participants ADD KEY idx_chat_user (user_id,conversation_id);
+
+-- =========================================================
+-- STEP 64 - Add chat_messages.idx_chat_messages index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE chat_messages ADD KEY idx_chat_messages (conversation_id,id);
+
+-- =========================================================
+-- STEP 65 - Add project_files.idx_project_files_project_id index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE project_files ADD KEY idx_project_files_project_id (project_id);
+
+-- =========================================================
+-- STEP 66 - Add payroll_run_items.idx_payroll_employee index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE payroll_run_items ADD KEY idx_payroll_employee (employee_id);
+
+-- =========================================================
+-- STEP 67 - Add payroll_documents.idx_payroll_document_employee index
+-- =========================================================
+-- Run ONLY if no equivalent index exists.
+ALTER TABLE payroll_documents ADD KEY idx_payroll_document_employee (employee_id,salary_cycle_id);
+
+-- =========================================================
+-- STEP 68 - Check duplicate notification dedupe keys
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT dedupeKey,COUNT(*) AS records FROM notifications WHERE dedupeKey IS NOT NULL GROUP BY dedupeKey HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 69 - Add notifications.uq_notification_dedupe unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE notifications ADD UNIQUE KEY uq_notification_dedupe (dedupeKey);
+
+-- =========================================================
+-- STEP 70 - Check duplicate calendar periods
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT year,month,COUNT(*) AS records FROM calendarsession GROUP BY year,month HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 71 - Add calendarsession.uq_calendar_period unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE calendarsession ADD UNIQUE KEY uq_calendar_period (year,month);
+
+-- =========================================================
+-- STEP 72 - Check duplicate salary periods
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT year,month,COUNT(*) AS records FROM salarycycle GROUP BY year,month HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 73 - Add salarycycle.uq_salary_period unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE salarycycle ADD UNIQUE KEY uq_salary_period (year,month);
+
+-- =========================================================
+-- STEP 74 - Check duplicate salary calendar references
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT calendar_session_id,COUNT(*) AS records FROM salarycycle WHERE calendar_session_id IS NOT NULL GROUP BY calendar_session_id HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 75 - Add salarycycle.uq_salary_calendar unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE salarycycle ADD UNIQUE KEY uq_salary_calendar (calendar_session_id);
+
+-- =========================================================
+-- STEP 76 - Check duplicate chat project references
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT project_id,COUNT(*) AS records FROM chat_conversations WHERE project_id IS NOT NULL GROUP BY project_id HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 77 - Add chat_conversations.uq_chat_project unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE chat_conversations ADD UNIQUE KEY uq_chat_project (project_id);
+
+-- =========================================================
+-- STEP 78 - Check duplicate payroll document keys
+-- =========================================================
+-- IMPORTANT: The result must have ZERO rows before the next step.
+SELECT salary_cycle_id,document_key,COUNT(*) AS records FROM payroll_documents GROUP BY salary_cycle_id,document_key HAVING COUNT(*)>1;
+
+-- =========================================================
+-- STEP 79 - Add payroll_documents.uq_payroll_document unique key
+-- =========================================================
+-- IMPORTANT: Run ONLY if duplicate check returned ZERO rows and no equivalent UNIQUE exists. Never delete duplicate data.
+ALTER TABLE payroll_documents ADD UNIQUE KEY uq_payroll_document (salary_cycle_id,document_key);
+
+-- SEEDS: preserve current settings and access grants.
+-- =========================================================
+-- STEP 80 - Insert missing permission module labels
+-- =========================================================
+-- NOT EXISTS prevents duplicate names. Existing access_control grants are unchanged.
+INSERT INTO modules (moduleName)
+SELECT names.moduleName FROM (
+ SELECT 'Dashboard' AS moduleName UNION ALL SELECT 'People'
+ UNION ALL SELECT 'Human Resources' UNION ALL SELECT 'Attendance'
+ UNION ALL SELECT 'Configuration' UNION ALL SELECT 'Projects'
+ UNION ALL SELECT 'Performance' UNION ALL SELECT 'Lead Management'
+ UNION ALL SELECT 'Pipeline' UNION ALL SELECT 'Follow-ups'
+ UNION ALL SELECT 'Sales' UNION ALL SELECT 'Accounts'
+ UNION ALL SELECT 'Payroll' UNION ALL SELECT 'Expenses'
+ UNION ALL SELECT 'Assets' UNION ALL SELECT 'Talent Acquisition'
+ UNION ALL SELECT 'Dynamics' UNION ALL SELECT 'Users Management'
+ UNION ALL SELECT 'Reports'
+) AS names WHERE NOT EXISTS
+(SELECT 1 FROM modules m WHERE m.moduleName=names.moduleName);
+
+-- =========================================================
+-- STEP 81 - Check payroll settings
+-- =========================================================
+SELECT id,rule_mode,cutoff_day FROM payroll_processing_settings WHERE id=1;
+
+-- =========================================================
+-- STEP 82 - Insert default payroll settings
+-- =========================================================
+-- Run only when id 1 was absent. Existing settings are preserved.
+INSERT IGNORE INTO payroll_processing_settings (id,rule_mode,cutoff_day) VALUES (1,'AFTER_MONTH_END',25);
+
+-- =========================================================
+-- STEP 83 - Check mobile attendance settings
+-- =========================================================
+SELECT id,allowClockIn,allowClockOut FROM attendance_mobile_settings WHERE id=1;
+
+-- =========================================================
+-- STEP 84 - Insert default mobile attendance settings
+-- =========================================================
+-- Run only when id 1 was absent. Existing settings are preserved.
+INSERT IGNORE INTO attendance_mobile_settings (id,allowClockIn,allowClockOut) VALUES (1,1,1);
+
+-- =========================================================
+-- FINAL VERIFICATION - READ ONLY
+-- =========================================================
+
+-- =========================================================
+-- STEP 85 - Verify selected database
+-- =========================================================
+SELECT DATABASE() AS selected_database,VERSION() AS mysql_version;
+
+-- =========================================================
+-- STEP 86 - List tables
+-- =========================================================
+SHOW TABLES;
+
+-- =========================================================
+-- STEP 87 - Verify tbl_users
+-- =========================================================
+DESCRIBE tbl_users;
+
+-- =========================================================
+-- STEP 88 - Verify notifications
+-- =========================================================
+DESCRIBE notifications;
+
+-- =========================================================
+-- STEP 89 - Verify assignedprojects
+-- =========================================================
+DESCRIBE assignedprojects;
+
+-- =========================================================
+-- STEP 90 - Verify payroll settings
+-- =========================================================
+SELECT * FROM payroll_processing_settings;
+
+-- =========================================================
+-- STEP 91 - Verify mobile attendance settings
+-- =========================================================
+SELECT * FROM attendance_mobile_settings;
+
+-- =========================================================
+-- STEP 92 - Verify modules
+-- =========================================================
+SELECT id,moduleName FROM modules ORDER BY id;
+
+-- =========================================================
+-- STEP 93 - Verify all 17 new table names
+-- =========================================================
+SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('password_reset_tokens','password_reset_rate_limits','notification_email_outbox','notification_dismissals','chat_conversations','chat_participants','chat_messages','chat_reactions','chat_files','chat_typing','chat_presence','project_files','payroll_processing_settings','payroll_run_items','payroll_documents','payroll_admin_deliveries','attendance_mobile_settings') ORDER BY TABLE_NAME;
+
+-- =========================================================
+-- STEP 94 - Verify unique indexes
+-- =========================================================
+SELECT TABLE_NAME,INDEX_NAME,NON_UNIQUE,COLUMN_NAME,SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME IN ('uq_notification_dedupe','uq_calendar_period','uq_salary_period','uq_salary_calendar','uq_chat_project','uq_payroll_document') ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX;

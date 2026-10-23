@@ -50,11 +50,13 @@ async function main() {
     assert(assignments.some((result)=>[400,409].includes(result.status)),"other concurrent assignment should be rejected");
     const repeat=await request("/api/admin/assignProject","POST",{employee_id:employee.id,projectId});
     assert.equal(repeat.status,400);
+    const workingOngoingProject=await request(`/api/admin/updateProjectStatus/${projectId}`,"PATCH",{completionStatus:"Working"});
+    assert.equal(workingOngoingProject.status,200,"ongoing projects should move to Working without a deadline");
     const changedProject=await request(`/api/admin/updateProjectStatus/${projectId}`,"PATCH",{completionStatus:"Completed"});
     assert.equal(changedProject.status,200,JSON.stringify(changedProject.data));
     const unchangedProject=await request(`/api/admin/updateProjectStatus/${projectId}`,"PATCH",{completionStatus:"Completed"});
     assert.equal(unchangedProject.status,200);
-    assert.equal(deliveries.length,2,"repeating an unchanged status must not queue another email");
+    assert.equal(deliveries.length,3,"repeating an unchanged status must not queue another email");
     const editedProject=await request(`/api/admin/updateProject/${projectId}`,"PUT",{projectName,projectCategory:"Notification Test",description:"Temporary integration test",startDate:future,completionStatus:"Working"});
     assert.equal(editedProject.status,200,JSON.stringify(editedProject.data));
     const removedAssignment=await request(`/api/admin/unassignProject/${assigned.data.id}`,"PATCH",{});
@@ -76,7 +78,7 @@ async function main() {
     assert(notices.some((notice: any)=>notice.message.includes("assigned a new Todo") && notice.targetUrl.includes(`todoId=${todoId}`)));
     assert(notices.some((notice: any)=>notice.message.includes("status changed") && notice.type==="todo"));
     assert(notices.some((notice: any)=>notice.message.includes("due date changed")));
-    assert.equal(deliveries.length,6,"assignment, two project status changes, removal, Todo assignment, and due change should queue email once");
+    assert.equal(deliveries.length,7,"assignment, three project status changes, removal, Todo assignment, and due change should queue email once");
     await pool.query("UPDATE todo SET deadline=?,completionStatus='Pending' WHERE id=?",[yesterday,todoId]);
     await processOverdueTodos(today,todoId);
     await processOverdueTodos(today,todoId);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import pool from "../database/db";
 import * as notices from "../services/notificationService";
 import * as emails from "../services/emailService";
-import { adminAttendanceRecorded, attendanceEvent, decisionEvent, leaveRequested, nonCriticalNotification, wfhRequested } from "../services/notificationEvents";
+import { adminAttendanceRecorded, decisionEvent, leaveRequested, nonCriticalNotification, wfhRequested } from "../services/notificationEvents";
 
 async function main() {
   const originalQuery = pool.query;
@@ -22,10 +22,6 @@ async function main() {
   (notices as any).notifyUser = async (id: number, notice: any) => { inApp.push(`user:${id}:${notice.type}:${notice.targetUrl}`); };
   (emails as any).queueEmail = async (to: string, _title: string, _message: string, _url: string, key: string) => { sent.push(`${to}:${key}`); };
   try {
-    await attendanceEvent(2,101,"in",{date:"2026-10-07",time:"09:05",status:"Present"});
-    await attendanceEvent(2,101,"out",{date:"2026-10-07",time:"17:10",clockIn:"09:05",worked:"08:05"});
-    await attendanceEvent(1,102,"in",{date:"2026-10-07",time:"09:00"});
-    await attendanceEvent(1,102,"out",{date:"2026-10-07",time:"17:00"});
     await wfhRequested(2,201,"2026-10-10","2026-10-12","Family need");
     await leaveRequested(2,301,"ANNUAL","2026-10-10","2026-10-12");
     await decisionEvent("leave",2,301,"Approved");
@@ -35,9 +31,11 @@ async function main() {
     await adminAttendanceRecorded(2, 401, "2026-10-20", "Present (Remote)", "09:00", null);
     assert(sent.some((x) => x.includes("attendance:401:admin-created:email")));
     assert(inApp.some((x) => x.includes("user:2:attendance:/user/reports?tab=ATTENDANCE_REPORT")));
-    assert.equal(inApp.filter((x) => x.startsWith("admin:")).length, 4);
+    assert.equal(inApp.filter((x) => x.startsWith("admin:")).length, 2);
     assert.equal(inApp.filter((x) => x.startsWith("user:")).length, 5);
-    assert.equal(sent.length, 15);
+    assert.equal(sent.length, 9);
+    assert(!sent.some((x) => x.includes(":in:")), "clock-in emails must not be queued");
+    assert(!sent.some((x) => x.includes(":out")), "clock-out emails must not be queued");
     assert(sent.every((x) => x.includes("example.invalid")));
     assert(!inApp.some((x) => x.includes("user:1:attendance")));
     const priorEmailCount = sent.length;

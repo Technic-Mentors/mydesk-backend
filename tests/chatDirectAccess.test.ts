@@ -27,6 +27,12 @@ async function main() {
     });
     const port = (server.address() as AddressInfo).port;
     const headers = { Authorization: `Bearer ${tokenFor(employees[0])}`, "Content-Type": "application/json" };
+    const forbiddenGroup = await fetch(`http://127.0.0.1:${port}/api/chat/conversations`, {
+      method: "POST", headers,
+      body: JSON.stringify({ type: "group", name: "Not allowed", userIds: [admin.id, employees[1].id] }),
+    });
+    assert.equal(forbiddenGroup.status, 403, "employees must not create groups");
+
     const forbidden = await fetch(`http://127.0.0.1:${port}/api/chat/conversations`, {
       method: "POST", headers, body: JSON.stringify({ type: "direct", userIds: [employees[1].id] }),
     });

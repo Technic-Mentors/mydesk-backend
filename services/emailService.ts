@@ -1,6 +1,9 @@
 import nodemailer from "nodemailer";
 import pool from "../database/db";
 
+const isRetiredAlertEmail = (key: string) =>
+  /^attendance:\d+:in:/.test(key) || /^progress:\d+:submitted:/.test(key);
+
 const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 
 export function emailTemplate(title: string, message: string, targetUrl?: string): string {
@@ -25,7 +28,7 @@ export async function sendSensitiveEmail(recipient: string, title: string, messa
 }
 
 export async function queueEmail(recipient: string | null | undefined, title: string, message: string, targetUrl: string, dedupeKey: string): Promise<void> {
-  if (!recipient) return;
+  if (!recipient || isRetiredAlertEmail(dedupeKey)) return;
   try {
     const [result]: any = await pool.query(
       `INSERT INTO notification_email_outbox (dedupeKey,recipient,subject,bodyHtml) VALUES (?,?,?,?)
@@ -42,6 +45,7 @@ export async function deliverEmail(id: number): Promise<void> {
   const [rows]: any = await pool.query("SELECT * FROM notification_email_outbox WHERE id=? AND status<>'sent'", [id]);
   if (!rows.length) return;
   const mail = rows[0];
+  if (isRetiredAlertEmail(mail.dedupeKey)) return;
   try {
     const port = Number(process.env.SMTP_PORT || 587);
     if (!process.env.SMTP_HOST || !process.env.SMTP_FROM_EMAIL) throw new Error("SMTP configuration missing");
@@ -60,7 +64,7 @@ export async function deliverEmail(id: number): Promise<void> {
 export async function retryFailedEmails(): Promise<void> {
   if (!process.env.SMTP_HOST || !process.env.SMTP_FROM_EMAIL) return;
   const [rows]: any = await pool.query(
-    "SELECT id FROM notification_email_outbox WHERE status IN ('pending','failed') AND attempts<5 AND createdAt<DATE_SUB(NOW(), INTERVAL 30 SECOND) ORDER BY id LIMIT 20",
+    "SELECT id FROM notification_email_outbox WHERE status IN ('pending','failed') AND attempts<5 AND createdAt<DATE_SUB(NOW(), INTERVAL 30 SECOND) AND dedupeKey NOT LIKE 'attendance:%:in:%' AND dedupeKey NOT LIKE 'progress:%:submitted:%' ORDER BY id LIMIT 20",
   );
   for (const row of rows) await deliverEmail(row.id);
 }

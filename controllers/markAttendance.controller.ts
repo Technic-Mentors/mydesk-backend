@@ -2,7 +2,6 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import moment from "moment-timezone";
 import { assessGeofence, validCoordinates } from "../utils/geofence";
-import { attendanceEvent, nonCriticalNotification } from "../services/notificationEvents";
 import { getMobileClockSettings, isMobileAttendanceRequest } from "./attendanceMobileSettings.controller";
 
 // Helper function to determine attendance status
@@ -598,8 +597,6 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 [currentTime, diff, finalStatus, latitude, longitude, record.id]
             );
 
-            await nonCriticalNotification(() => attendanceEvent(Number(userId), Number(record.id), "out", { date: today, time: currentTime, clockIn: String(record.clockIn), worked: diff, status: finalStatus }));
-
             res.status(200).json({
                 message: "Clock Out successful",
                 status: finalStatus,
@@ -671,7 +668,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         }
 
         // ✅ INSERT new attendance record
-        const [result] = await pool.query(
+        await pool.query(
             `INSERT INTO attendance 
              (userId, date, clockIn, attendanceStatus, status, type,
               latitude, longitude, clockInLatitude, clockInLongitude) 
@@ -682,8 +679,6 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 latitude, longitude, latitude, longitude
             ]
         );
-
-        await nonCriticalNotification(() => attendanceEvent(Number(userId), Number((result as any).insertId), "in", { date: today, time: currentTime, status: attendanceStatus }));
 
         res.status(200).json({
             message: `Clock In successful`,

@@ -18,19 +18,6 @@ const actionTime = () => new Intl.DateTimeFormat("en-GB", {
   timeZone:"Asia/Karachi", day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit",
 }).format(new Date());
 
-export async function attendanceEvent(userId: number, attendanceId: number, action: "in" | "out", details: { date: string; time: string; clockIn?: string; worked?: string; status?: string }) {
-  const user = await person(userId); if (!user) return;
-  const title = `MyDesk Attendance - Clock ${action === "in" ? "In" : "Out"} Confirmation`;
-  const message = `${user.name} clocked ${action} at ${details.time} on ${details.date}${details.worked ? `. Worked: ${details.worked}` : ""}.`;
-  const key = `attendance:${attendanceId}:${action}`;
-  const url = user.role?.toLowerCase() === "admin" ? "/attendance?tab=MARK" : "/users/attendance";
-  await queueEmail(user.email,title,`Hello ${user.name}, your clock ${action} was recorded. Date: ${details.date}. Clock ${action}: ${details.time}.${details.clockIn ? ` Clock in: ${details.clockIn}.` : ""}${details.worked ? ` Total worked: ${details.worked}.` : ""}${details.status ? ` Status: ${details.status}.` : ""}`,url,`${key}:employee`);
-  if (user.role?.toLowerCase() !== "admin") {
-    await notifyAdmins({ title,message,type:"attendance",module:MODULE.Attendance,referenceId:attendanceId,targetUrl:`/attendance?tab=EMPLOYEE&recordId=${attendanceId}`,dedupeKey:key },userId);
-    await emailAdmins(title,message,"/attendance?tab=EMPLOYEE",key,userId);
-  }
-}
-
 export async function adminAttendanceRecorded(
   userId: number,
   attendanceId: number,

@@ -128,6 +128,7 @@ router.get("/global-search", authenticateToken, async (req: AuthenticatedRequest
       if (source.active && columns.has(source.active[0])) { conditions.push(`${quoted(source.active[0])} = ?`); params.push(source.active[1]); }
       if (employee && source.owner && columns.has(source.owner)) { conditions.push(`${quoted(source.owner)} = ?`); params.push(user.id); }
       if (source.type === "notification" && !employee) { conditions.push("`userId` = ?"); params.push(user.id); }
+      if (source.type === "notification" && columns.has("dedupeKey")) conditions.push("(`dedupeKey` IS NULL OR (`dedupeKey` NOT LIKE 'attendance:%:in:%' AND `dedupeKey` NOT LIKE 'progress:%:submitted:%'))");
       if (source.type === "todo" && columns.has("todoStatus")) conditions.push("`todoStatus` != 'N'");
       if (source.type === "progress" && columns.has("progressStatus")) conditions.push("`progressStatus` = 'Y'");
       if (source.type === "system_user" && columns.has("role")) conditions.push("LOWER(`role`) != 'user'");

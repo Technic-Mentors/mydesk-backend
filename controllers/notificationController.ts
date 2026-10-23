@@ -20,6 +20,7 @@ export const getNotifications = async (req: AuthenticatedRequest, res: Response)
         DATE_FORMAT(createdAt, '%Y-%m-%dT%H:%i:%s.000Z') as createdAt
        FROM notifications
        WHERE userId = ?
+       AND (dedupeKey IS NULL OR (dedupeKey NOT LIKE 'attendance:%:in:%' AND dedupeKey NOT LIKE 'progress:%:submitted:%'))
        ORDER BY createdAt DESC, id DESC
        LIMIT 50`,
       [req.user.id]

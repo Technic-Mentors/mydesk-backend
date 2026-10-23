@@ -3,8 +3,6 @@ import pool from "../database/db";
 import { hasPermission, MODULE } from "../permissionModel";
 import { RowDataPacket } from "mysql2";
 import sanitizeHtml from "sanitize-html";
-import { progressSubmittedEvent } from "../services/projectTodoEvents";
-import { nonCriticalNotification } from "../services/notificationEvents";
 
 const sanitizeNote = (dirty: string) =>
   sanitizeHtml(dirty, {
@@ -257,14 +255,11 @@ const { projectId, date, note: rawNote, employee_id: bodyEmployeeId } = req.body
     }
 
     // Insert with created_by and created_by_role
-    const [inserted]: any = await pool.query(
+    await pool.query(
       `INSERT INTO progress (employee_id, email, projectId, date, note, progressStatus, created_by, created_by_role)
        VALUES (?, ?, ?, ?, ?, 'Y', ?, ?)`,
       [finalEmployeeId, email, projectId, date, note, user?.id, createdByRole],
     );
-    if (createdByRole === "employee") {
-      await nonCriticalNotification(() => progressSubmittedEvent(Number(inserted.insertId), finalEmployeeId));
-    }
 
     res.status(200).json({ 
       message: "Progress Added",

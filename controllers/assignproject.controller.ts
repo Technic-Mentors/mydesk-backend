@@ -13,6 +13,8 @@ interface AssignedProject extends RowDataPacket {
   projectName: string;
   description: string;
   completionStatus: string;
+  assigned_by?: number | null;
+  assignedByName?: string | null;
 }
 
 export const getAllAssignProjects = async (req: Request, res: Response) => {
@@ -73,7 +75,48 @@ ORDER BY ap.id DESC
 `;
 
     const [rows] = await pool.query<AssignedProject[]>(query, [userId]);
-    res.json(rows);
+    if (!rows.length) {
+      res.json([]);
+      return;
+    }
+
+    const projectIds = [...new Set(rows.map((row) => row.projectId))];
+    const placeholders = projectIds.map(() => "?").join(",");
+    const [assignedEmployees] = await pool.query<(RowDataPacket & {
+      projectId: number;
+      id: number;
+      name: string;
+      image: string | null;
+    })[]>(
+      `SELECT DISTINCT ap.projectId, u.id, u.name, u.image
+       FROM assignedprojects ap
+       JOIN tbl_users u ON u.id = ap.employee_id
+       WHERE ap.projectId IN (${placeholders})
+         AND ap.assignStatus = 'Y'
+         AND u.status = 'Active'
+       ORDER BY u.name ASC`,
+      projectIds,
+    );
+    const assigneesByProject = new Map<number, { id: number; name: string; image: string | null }[]>();
+    for (const employee of assignedEmployees) {
+      const assignees = assigneesByProject.get(employee.projectId) ?? [];
+      assignees.push({ id: employee.id, name: employee.name, image: employee.image });
+      assigneesByProject.set(employee.projectId, assignees);
+    }
+    res.json(rows.map((row) => {
+      const assignees = assigneesByProject.get(row.projectId) ?? [];
+      return {
+        project: {
+          id: row.projectId,
+          projectName: row.projectName,
+          description: row.description,
+          completionStatus: row.completionStatus,
+          assignees,
+        },
+        ...row,
+        assignees,
+      };
+    }));
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
