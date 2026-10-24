@@ -17,10 +17,7 @@ export const getPromotionPositions = async (req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    const [users]: any = await pool.query(
-      "SELECT role, roleId FROM tbl_users WHERE id = ? LIMIT 1",
-      [employeeId]
-    );
+    const [users]: any = await pool.query("SELECT id FROM tbl_users WHERE id = ? LIMIT 1", [employeeId]);
     if (!users.length) {
       res.status(404).json({ message: "Employee not found" });
       return;
@@ -32,18 +29,10 @@ export const getPromotionPositions = async (req: AuthenticatedRequest, res: Resp
       [employeeId]
     );
     const currentPosition = String(currentRows[0]?.position || "").trim();
-    const [positionRows]: any = await pool.query(
-      `SELECT DISTINCT TRIM(el.position) AS title
-       FROM employee_lifeline el JOIN tbl_users u ON u.id = el.employee_id
-       WHERE u.role = ? AND u.roleId <=> ? AND u.loginStatus = 'Y'
-         AND u.status IN ('Active', 'Y')
-         AND el.position IS NOT NULL AND TRIM(el.position) != ''`,
-      [users[0].role, users[0].roleId]
+    const [roleRows]: any = await pool.query(
+      "SELECT roleName AS title FROM roles WHERE TRIM(roleName) != '' ORDER BY id ASC"
     );
-    const [jobRows]: any = await pool.query(
-      "SELECT job_title AS title FROM jobs WHERE status = 'Y' AND TRIM(job_title) != ''"
-    );
-    const titles = [...positionRows, ...jobRows].map((row: any) => String(row.title));
+    const titles = roleRows.map((row: any) => String(row.title));
     const positions = promotionPositionOptions(currentPosition, titles);
 
     res.json({

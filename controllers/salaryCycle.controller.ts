@@ -82,7 +82,7 @@ export const runSalaryCycle = async (req: AuthenticatedRequest, res: Response): 
       const [attendance]: any = await connection.query(
         "SELECT DATE_FORMAT(date, '%Y-%m-%d') AS day FROM attendance " +
         "WHERE userId = ? AND date BETWEEN ? AND ? AND status = 'Y' " +
-        "AND LOWER(attendanceStatus) IN ('present', 'late', 'leave', 'short leave')",
+        "AND LOWER(attendanceStatus) IN ('present', 'late', 'leave', 'full day', 'sick leave', 'casual leave', 'annual leave', 'family responsibility', 'short leave')",
         [sal.employee_id, eligibleFrom, payEnd]);
       for (const row of attendance) paid.set(row.day, 1);
       const [leaves]: any = await connection.query(

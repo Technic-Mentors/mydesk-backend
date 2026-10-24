@@ -49,6 +49,7 @@ import rejoinRoutes from "./routes/rejoin.routes";
 import userDashboardRoutes from "./routes/userDashboard.routes";
 import salaryCycleRoutes from "./routes/salaryCycle.routes";
 import rolesRoutes from "./routes/roles.routes";
+import { getRoles } from "./controllers/role.controller";
 import systemUsersRoutes from "./routes/systemuser.routes";
 import accesscontrolRoutes from "./routes/accesscontrol.routes";
 import accountReportRoutes from "./routes/accountreport.routes";
@@ -222,6 +223,7 @@ securedMount(app, "/api", salaryCycleRoutes, MODULE.Payroll, [
 ], [
   { path: /^\/admin\/getPayrollReport$/i, module: MODULE.Reports, methods: ["GET"] },
 ]);
+app.get("/api/position-roles", authenticateToken, getRoles);
 securedMount(app, "/api/admin", rolesRoutes, MODULE.UsersManagement, [], [
   { path: /^\/getRoles$/i, module: MODULE.Configuration },
 ]);

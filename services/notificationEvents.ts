@@ -18,6 +18,18 @@ const actionTime = () => new Intl.DateTimeFormat("en-GB", {
   timeZone:"Asia/Karachi", day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit",
 }).format(new Date());
 
+const attendanceStatusLabel = (status: string): string => {
+  const normalized = status.trim().toLowerCase();
+  const leaveNames: Record<string, string> = {
+    leave: "Full Day", "full day": "Full Day", "half leave": "Half Day",
+    "short leave": "Short Leave", "sick leave": "Sick Leave",
+    "casual leave": "Casual Leave", "annual leave": "Annual Leave",
+    "family responsibility": "Family Responsibility",
+  };
+  if (leaveNames[normalized]) return leaveNames[normalized] + " (Leave)";
+  return status.trim().replace(/^./, (letter) => letter.toUpperCase());
+};
+
 export async function adminAttendanceRecorded(
   userId: number,
   attendanceId: number,
@@ -29,7 +41,7 @@ export async function adminAttendanceRecorded(
   const user = await person(userId);
   if (!user) return;
   const title = "Attendance recorded by administration";
-  const details = "Your attendance for " + date + " was recorded as " + status +
+  const details = "Your attendance for " + date + " was recorded as " + attendanceStatusLabel(status) +
     (clockIn ? ". Clock in: " + clockIn : "") +
     (clockOut ? ". Clock out: " + clockOut : "") + ".";
   const targetUrl = "/user/reports?tab=ATTENDANCE_REPORT";
@@ -43,6 +55,29 @@ export async function adminAttendanceRecorded(
     referenceId: attendanceId,
     targetUrl,
     dedupeKey: key + ":user:" + userId,
+  });
+}
+
+export async function adminAttendanceUpdated(
+  userId: number,
+  attendanceId: number,
+  date: string,
+  status: string,
+  clockIn?: string | null,
+  clockOut?: string | null,
+): Promise<void> {
+  const user = await person(userId);
+  if (!user) return;
+  const title = "Attendance updated by administration";
+  const details = "Your attendance for " + date + " was updated to " + attendanceStatusLabel(status) +
+    (clockIn ? ". Clock in: " + clockIn : "") +
+    (clockOut ? ". Clock out: " + clockOut : "") + ".";
+  const targetUrl = "/user/reports?tab=ATTENDANCE_REPORT";
+  const key = "attendance:" + attendanceId + ":admin-updated:" + Date.now();
+  await queueEmail(user.email, title, "Hello " + user.name + ", " + details, targetUrl, key + ":email");
+  await notifyUser(userId, {
+    title, message: details, type: "attendance", module: MODULE.Attendance,
+    referenceId: attendanceId, targetUrl, dedupeKey: key + ":user:" + userId,
   });
 }
 

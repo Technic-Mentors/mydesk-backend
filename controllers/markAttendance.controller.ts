@@ -414,7 +414,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
 
         // ✅ NEW: Check if user already has a "Leave" attendance record today
         const hasLeaveAttendance = attendanceRows.some((r: any) =>
-            r.attendanceStatus && r.attendanceStatus.toLowerCase() === 'leave'
+            r.attendanceStatus && ['leave', 'full day', 'sick leave', 'casual leave', 'annual leave', 'family responsibility'].includes(r.attendanceStatus.toLowerCase())
         );
 
         // ============================================================

@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
-import { adminAttendanceRecorded, nonCriticalNotification } from "../services/notificationEvents";
+import { adminAttendanceRecorded, adminAttendanceUpdated, decisionEvent, nonCriticalNotification } from "../services/notificationEvents";
 
 const toMySQLDate = (dateStr: string | null): string | null => {
   if (!dateStr) return null;
@@ -20,13 +20,26 @@ const toMySQLDate = (dateStr: string | null): string | null => {
   }
 };
 
+const fullDayLeaveStatuses = new Set([
+  "leave", "full day", "sick leave", "casual leave", "annual leave", "family responsibility",
+]);
+
+const attendanceStatusForLeaveType = (leaveType: string): string => {
+  const type = leaveType.trim().toUpperCase();
+  if (type === "HALF DAY") return "half leave";
+  if (type === "SHORT LEAVE") return "short leave";
+  return type.toLowerCase();
+};
+
+const leaveTypeForAttendanceStatus = (status: string): string =>
+  status.trim().toLowerCase() === "half leave" ? "HALF DAY" :
+  status.trim().toLowerCase() === "leave" ? "FULL DAY" :
+  status.trim().toUpperCase();
+
 const findConflictingApprovedLeave = async (
-  userId: number,
-  date: string,
-  attendanceStatus: string,
+  userId: number, date: string, attendanceStatus: string,
 ): Promise<RowDataPacket | null> => {
   const status = attendanceStatus.trim().toLowerCase();
-  if (status === "leave") return null;
   const [rows] = await pool.query<RowDataPacket[]>(
     "SELECT id, leaveType, leaveSubject FROM leaves " +
       "WHERE userId = ? AND status = 'Y' AND LOWER(leaveStatus) = 'approved' " +
@@ -34,11 +47,45 @@ const findConflictingApprovedLeave = async (
     [userId, date],
   );
   return rows.find((leave) => {
-    const type = String(leave.leaveType || leave.leaveSubject || "").trim().toLowerCase();
-    if (status === "short leave" && type.includes("short")) return false;
-    if (status === "half leave" && type.includes("half")) return false;
-    return true;
+    const matching = attendanceStatusForLeaveType(
+      String(leave.leaveType || leave.leaveSubject || ""));
+    return status !== matching && !(status === "leave" && matching === "full day");
   }) || null;
+};
+
+const findPendingLeaveForDate = async (userId: number, date: string): Promise<RowDataPacket | null> => {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT id, leaveType, leaveSubject FROM leaves WHERE userId = ? AND status = 'Y' AND leaveStatus = 'Pending' " +
+      "AND ? BETWEEN fromDate AND toDate ORDER BY id DESC LIMIT 1",
+    [userId, date],
+  );
+  return rows[0] || null;
+};
+
+const approveOrCreateAttendanceLeave = async (
+  connection: any, userId: number, date: string, attendanceStatus: string, createWhenMissing: boolean,
+): Promise<number | null> => {
+  const [rows]: any = await connection.query(
+    "SELECT id, leaveStatus FROM leaves WHERE userId = ? AND status = 'Y' " +
+      "AND leaveStatus IN ('Pending', 'Approved') AND ? BETWEEN fromDate AND toDate " +
+      "ORDER BY FIELD(leaveStatus, 'Pending', 'Approved'), id DESC LIMIT 1 FOR UPDATE",
+    [userId, date],
+  );
+  if (rows.length) {
+    if (rows[0].leaveStatus === "Pending") {
+      await connection.query("UPDATE leaves SET leaveStatus = 'Approved' WHERE id = ?", [rows[0].id]);
+      return Number(rows[0].id);
+    }
+    return null;
+  }
+  if (!createWhenMissing) throw new Error("Pending leave request changed; refresh attendance and try again.");
+  const [result]: any = await connection.query(
+    "INSERT INTO leaves (userId, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus, status) " +
+      "VALUES (?, ?, ?, ?, ?, 'Marked as leave in attendance', 'Approved', 'Y')",
+    [userId, date, date, leaveTypeForAttendanceStatus(attendanceStatus), leaveTypeForAttendanceStatus(attendanceStatus)],
+  );
+  // A newly created administrative leave is already approved; notify its employee.
+  return Number(result.insertId);
 };
 
 const calculateWorkingHours = (
@@ -355,6 +402,20 @@ export const addAttendance = async (
     console.log(`📊 Final status before INSERT: ${finalStatus}`);
 
     // ✅ Insert attendance
+    const pendingLeave = await findPendingLeaveForDate(Number(userId), formattedDate);
+    const applicableStatus = pendingLeave
+      ? attendanceStatusForLeaveType(String(pendingLeave.leaveType || pendingLeave.leaveSubject || ""))
+      : null;
+    if (pendingLeave && String(manualStatus).toLowerCase() !== applicableStatus) {
+      res.status(409).json({
+        success: false,
+        code: "PENDING_LEAVE_STATUS_CONFLICT",
+        leaveId: pendingLeave.id,
+        message: "This employee has a pending leave request for this date. You cannot mark " + manualStatus + ". Mark " + applicableStatus + " to approve it, or reject the leave request first.",
+      });
+      return;
+    }
+
     const approvedLeave = await findConflictingApprovedLeave(
       userIdNum, formattedDate, manualStatus);
     if (approvedLeave) {
@@ -368,157 +429,51 @@ export const addAttendance = async (
     }
 
     console.log("📝 Inserting attendance record...");
-    const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO attendance 
-       (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
-        type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, remoteApprovedBy) 
-       VALUES (?, ?, ?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        userIdNum,
-        formattedDate,
-        clockIn || null,
-        clockOut || null,
-        finalStatus,
-        workingHours,
-        type || 'Onsite',
-        remoteStatus || null,
-        remoteRequestDate || null,
-        remoteFromDate || null,
-        remoteToDate || null,
-        remoteReason || null,
-        remoteApprovedBy || null
-      ],
-    );
-
-    console.log(`✅ Attendance inserted successfully! ID: ${result.insertId}, Status: ${finalStatus}`);
-
-    // ============================================================
-    // ✅ AUTO-CREATE LEAVE IF ATTENDANCE STATUS IS 'LEAVE'
-    // ============================================================
-    console.log(`🔍 Checking if status is 'leave': ${finalStatus === 'leave'}`);
-    
-    if (finalStatus === 'leave') {
-      console.log(`🔍🔍🔍 STATUS IS 'LEAVE' - Attempting to auto-create leave!`);
-      console.log(`📝 User ID: ${userIdNum}, Date: ${formattedDate}`);
-      
-      try {
-        // Check if leave already exists for this date
-        console.log("🔍 Checking for existing leave...");
-        const [existingLeave] = await pool.query<RowDataPacket[]>(
-          `SELECT id FROM leaves 
-           WHERE userId = ? AND fromDate = ? AND status = 'Y'`,
-          [userIdNum, formattedDate]
+    const connection = await pool.getConnection();
+    let attendanceId: number;
+    let approvedLeaveId: number | null = null;
+    try {
+      await connection.beginTransaction();
+      const [result]: any = await connection.query(
+        `INSERT INTO attendance
+         (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
+          type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, remoteReason, remoteApprovedBy)
+         VALUES (?, ?, ?, ?, ?, ?, 'Y', ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userIdNum, formattedDate,
+          fullDayLeaveStatuses.has(finalStatus) ? null : clockIn || null,
+          fullDayLeaveStatuses.has(finalStatus) ? null : clockOut || null,
+          finalStatus, fullDayLeaveStatuses.has(finalStatus) ? null : workingHours,
+          type || "Onsite", remoteStatus || null,
+          remoteRequestDate || null, remoteFromDate || null, remoteToDate || null,
+          remoteReason || null, remoteApprovedBy || null,
+        ],
+      );
+      attendanceId = Number(result.insertId);
+      if (fullDayLeaveStatuses.has(finalStatus) || pendingLeave) {
+        approvedLeaveId = await approveOrCreateAttendanceLeave(
+          connection, userIdNum, formattedDate, finalStatus, fullDayLeaveStatuses.has(finalStatus),
         );
-
-        console.log(`📋 Existing leave check result: ${existingLeave.length > 0 ? 'FOUND' : 'NOT FOUND'}`);
-        
-        if (existingLeave.length > 0) {
-          console.log(`ℹ️ Leave already exists for user ${userIdNum} on ${formattedDate}`);
-          console.log(`📋 Existing leave ID: ${existingLeave[0].id}`);
-        } else {
-          // Get user name for logging
-          console.log("🔍 Fetching user name...");
-          const [userRows] = await pool.query<RowDataPacket[]>(
-            "SELECT name FROM tbl_users WHERE id = ?",
-            [userIdNum]
-          );
-          const userName = userRows.length > 0 ? userRows[0].name : 'User';
-          console.log(`👤 User name: ${userName}`);
-
-          // Determine leave type
-          let leaveType = req.body.leaveType || 'FULL DAY';
-          console.log(`📊 Raw leaveType from request: ${req.body.leaveType || 'NOT PROVIDED'}`);
-          console.log(`📊 LeaveType before validation: ${leaveType}`);
-          
-          const validLeaveTypes = ['FULL DAY', 'HALF DAY', 'SHORT LEAVE', 'CASUAL LEAVE', 'SICK LEAVE', 'ANNUAL LEAVE', 'FAMILY RESPONSIBILITY'];
-          if (!validLeaveTypes.includes(leaveType.toUpperCase())) {
-            console.log(`⚠️ Invalid leaveType: ${leaveType}, defaulting to FULL DAY`);
-            leaveType = 'FULL DAY';
-          }
-          console.log(`✅ Final leaveType: ${leaveType}`);
-
-          const leaveSubject = req.body.leaveSubject || `Leave on ${formattedDate}`;
-          const leaveReason = req.body.leaveReason || 'Auto-created from attendance marking';
-          
-          console.log(`📝 Leave Subject: ${leaveSubject}`);
-          console.log(`📝 Leave Reason: ${leaveReason}`);
-
-          console.log(`📝 Inserting leave with data:`, {
-            userId: userIdNum,
-            fromDate: formattedDate,
-            toDate: formattedDate,
-            leaveType: leaveType.toUpperCase(),
-            leaveSubject: leaveSubject,
-            leaveReason: leaveReason,
-            leaveStatus: 'Approved',
-            status: 'Y'
-          });
-
-          // Create leave request
-          console.log("📝 Executing INSERT into leaves table...");
-          const [leaveResult] = await pool.query<ResultSetHeader>(
-            `INSERT INTO leaves 
-             (userId, fromDate, toDate, leaveType, leaveSubject, leaveReason, leaveStatus, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'Approved', 'Y')`,
-            [
-              userIdNum,
-              formattedDate,
-              formattedDate,
-              leaveType.toUpperCase(),
-              leaveSubject,
-              leaveReason,
-            ]
-          );
-          
-          console.log(`✅✅✅ SUCCESS! Auto-created leave request for ${userName} (ID: ${userIdNum}) on ${formattedDate}`);
-          console.log(`📊 Leave ID: ${leaveResult.insertId}`);
-          console.log(`📊 Leave Type: ${leaveType}`);
-          console.log(`📊 Leave Subject: ${leaveSubject}`);
-          
-          // ✅ Verify the leave was created
-          console.log("🔍 Verifying leave was created...");
-          const [verifyLeave] = await pool.query<RowDataPacket[]>(
-            `SELECT * FROM leaves WHERE id = ?`,
-            [leaveResult.insertId]
-          );
-          
-          if (verifyLeave.length > 0) {
-            console.log(`✅✅✅ VERIFIED: Leave exists in database!`);
-            console.log(`📋 Verified leave data:`, {
-              id: verifyLeave[0].id,
-              userId: verifyLeave[0].userId,
-              fromDate: verifyLeave[0].fromDate,
-              toDate: verifyLeave[0].toDate,
-              leaveType: verifyLeave[0].leaveType,
-              leaveSubject: verifyLeave[0].leaveSubject,
-              leaveStatus: verifyLeave[0].leaveStatus,
-              status: verifyLeave[0].status
-            });
-          } else {
-            console.log(`❌❌❌ VERIFICATION FAILED: Leave not found in database!`);
-          }
-        }
-      } catch (leaveError) {
-        console.error("❌❌❌ ERROR auto-creating leave:", leaveError);
-        console.error("❌ Error details:", leaveError instanceof Error ? leaveError.message : leaveError);
-        console.error("❌ Stack trace:", leaveError instanceof Error ? leaveError.stack : 'No stack trace');
-        // Don't fail the attendance creation, just log the error
       }
-    } else {
-      console.log(`ℹ️ Status is NOT 'leave' (${finalStatus}), skipping auto-create`);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    if (approvedLeaveId) {
+      await nonCriticalNotification(() => decisionEvent("leave", userIdNum, approvedLeaveId!, "Approved"));
     }
 
-    console.log("🚀 ========== ADD ATTENDANCE END ==========");
-    console.log(`✅ Final response: Success, ID: ${result.insertId}, Status: ${finalStatus}`);
-
     await nonCriticalNotification(() => adminAttendanceRecorded(
-      userIdNum, result.insertId, formattedDate, finalStatus, clockIn, clockOut
+      userIdNum, attendanceId, formattedDate, finalStatus, clockIn, clockOut
     ));
 
     res.status(201).json({
       success: true,
       message: "Attendance added successfully",
-      data: { id: result.insertId, status: finalStatus },
+      data: { id: attendanceId, status: finalStatus },
     });
   } catch (error: any) {
     console.error("💥💥💥 SERVER ERROR:", error);
@@ -720,6 +675,20 @@ export const updateAttendance = async (
     }
 
     // ✅ Update with remote fields - clockOut can be null
+    const pendingLeave = await findPendingLeaveForDate(Number(userId), formattedDate);
+    const applicableStatus = pendingLeave
+      ? attendanceStatusForLeaveType(String(pendingLeave.leaveType || pendingLeave.leaveSubject || ""))
+      : null;
+    if (pendingLeave && String(reqStatus).toLowerCase() !== applicableStatus) {
+      res.status(409).json({
+        success: false,
+        code: "PENDING_LEAVE_STATUS_CONFLICT",
+        leaveId: pendingLeave.id,
+        message: "This employee has a pending leave request for this date. You cannot mark " + reqStatus + ". Mark " + applicableStatus + " to approve it, or reject the leave request first.",
+      });
+      return;
+    }
+
     const approvedLeave = await findConflictingApprovedLeave(
       Number(userId), formattedDate, reqStatus);
     if (approvedLeave) {
@@ -732,7 +701,11 @@ export const updateAttendance = async (
       return;
     }
 
-    await pool.query<ResultSetHeader>(
+    const connection = await pool.getConnection();
+    let approvedLeaveId: number | null = null;
+    try {
+      await connection.beginTransaction();
+    await connection.query(
       `UPDATE attendance
        SET userId = ?,
            date = ?, 
@@ -753,10 +726,10 @@ export const updateAttendance = async (
       [
         userId,
         formattedDate,
-        clockIn || null,
-        clockOut || null, // ✅ Allow null
+        fullDayLeaveStatuses.has(finalStatus) ? null : clockIn || null,
+        fullDayLeaveStatuses.has(finalStatus) ? null : clockOut || null,
         finalStatus,
-        workingHours,
+        fullDayLeaveStatuses.has(finalStatus) ? null : workingHours,
         type !== undefined ? type : existing[0].type,
         remoteStatus !== undefined ? remoteStatus : existing[0].remoteStatus,
         remoteApprovedBy !== undefined ? remoteApprovedBy : existing[0].remoteApprovedBy,
@@ -770,6 +743,34 @@ export const updateAttendance = async (
       ],
     );
 
+      if (fullDayLeaveStatuses.has(finalStatus)) {
+        await connection.query(
+          "UPDATE attendance SET status = 'N' WHERE userId = ? AND date = ? AND id != ? AND status = 'Y'",
+          [userId, formattedDate, id],
+        );
+      }
+      if (fullDayLeaveStatuses.has(finalStatus) || pendingLeave) {
+        approvedLeaveId = await approveOrCreateAttendanceLeave(
+          connection, Number(userId), formattedDate, finalStatus, fullDayLeaveStatuses.has(finalStatus),
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    if (approvedLeaveId) {
+      await nonCriticalNotification(() => decisionEvent("leave", Number(userId), approvedLeaveId!, "Approved"));
+    }
+
+    await nonCriticalNotification(() => adminAttendanceUpdated(
+      Number(userId), Number(id), formattedDate, finalStatus,
+      fullDayLeaveStatuses.has(finalStatus) ? null : clockIn || null,
+      fullDayLeaveStatuses.has(finalStatus) ? null : clockOut || null,
+    ));
+
     res.json({ 
       success: true,
       message: "Attendance updated successfully",
@@ -777,8 +778,8 @@ export const updateAttendance = async (
         id,
         status: finalStatus,
         workingHours,
-        clockIn: clockIn || null,
-        clockOut: clockOut || null
+        clockIn: fullDayLeaveStatuses.has(finalStatus) ? null : clockIn || null,
+        clockOut: fullDayLeaveStatuses.has(finalStatus) ? null : clockOut || null
       }
     });
   } catch (error) {

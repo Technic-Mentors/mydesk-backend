@@ -69,7 +69,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 'attendance' AS source
             FROM attendance a
             JOIN tbl_users u ON u.id = a.userId
-            WHERE a.attendanceStatus = 'leave' 
+            WHERE LOWER(a.attendanceStatus) IN ('leave', 'full day', 'sick leave', 'casual leave', 'annual leave', 'family responsibility')
             AND a.status = 'Y'
             AND u.name LIKE ?
         `;
@@ -78,20 +78,16 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
 
         console.log(`📊 Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
 
-        // ✅ NEW: Create a Set of dates that already have leaves (to avoid duplicates)
-        const leaveDateSet = new Set();
-        leaveRows.forEach((leave: any) => {
-            leaveDateSet.add(`${leave.userId}_${leave.fromDate}`);
-        });
-
-        console.log(`📋 Dates with existing leaves:`, Array.from(leaveDateSet));
-
+        // Match attendance leave against the full range of each request.
         // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
         const transformedAttendance = attendanceRows
             .filter((att: any) => {
                 // ✅ SKIP if there's already a leave for this user on this date
-                const key = `${att.userId}_${att.fromDate}`;
-                const hasLeave = leaveDateSet.has(key);
+                const hasLeave = leaveRows.some((leave: any) =>
+                    leave.userId === att.userId &&
+                    leave.fromDate <= att.fromDate &&
+                    leave.toDate >= att.fromDate
+                );
                 if (hasLeave) {
                     console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
                 }
@@ -100,7 +96,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
             .map((att: any) => ({
                 id: -att.attendanceId,
                 leaveSubject: `Leave on ${att.fromDate}`,
-                leaveType: 'FULL DAY',
+                leaveType: att.attendanceStatus?.toLowerCase() === 'leave' ? 'FULL DAY' : att.attendanceStatus?.toUpperCase(),
                 leaveReason: 'Marked as leave in attendance',
                 fromDate: att.fromDate,
                 toDate: att.toDate,
@@ -185,7 +181,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
             FROM attendance a
             JOIN tbl_users u ON u.id = a.userId
             WHERE a.userId = ? 
-            AND a.attendanceStatus = 'leave' 
+            AND LOWER(a.attendanceStatus) IN ('leave', 'full day', 'sick leave', 'casual leave', 'annual leave', 'family responsibility')
             AND a.status = 'Y'
         `;
 
@@ -193,20 +189,16 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
 
         console.log(`📊 User ${userId}: Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
 
-        // ✅ NEW: Create a Set of dates that already have leaves (to avoid duplicates)
-        const leaveDateSet = new Set();
-        leaveRows.forEach((leave: any) => {
-            leaveDateSet.add(`${leave.userId}_${leave.fromDate}`);
-        });
-
-        console.log(`📋 Dates with existing leaves for user ${userId}:`, Array.from(leaveDateSet));
-
+        // Match attendance leave against the full range of each request.
         // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
         const transformedAttendance = attendanceRows
             .filter((att: any) => {
                 // ✅ SKIP if there's already a leave for this user on this date
-                const key = `${att.userId}_${att.fromDate}`;
-                const hasLeave = leaveDateSet.has(key);
+                const hasLeave = leaveRows.some((leave: any) =>
+                    leave.userId === att.userId &&
+                    leave.fromDate <= att.fromDate &&
+                    leave.toDate >= att.fromDate
+                );
                 if (hasLeave) {
                     console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
                 }
@@ -215,7 +207,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
             .map((att: any) => ({
                 id: -att.attendanceId,
                 leaveSubject: `Leave on ${att.fromDate}`,
-                leaveType: 'FULL DAY',
+                leaveType: att.attendanceStatus?.toLowerCase() === 'leave' ? 'FULL DAY' : att.attendanceStatus?.toUpperCase(),
                 leaveReason: 'Marked as leave in attendance',
                 fromDate: att.fromDate,
                 toDate: att.toDate,
