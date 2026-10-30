@@ -716,11 +716,27 @@ SELECT * FROM attendance_mobile_settings;
 SELECT id,moduleName FROM modules ORDER BY id;
 
 -- =========================================================
--- STEP 93 - Verify all 17 new table names
+-- STEP 93 - Create Departments table
 -- =========================================================
-SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('password_reset_tokens','password_reset_rate_limits','notification_email_outbox','notification_dismissals','chat_conversations','chat_participants','chat_messages','chat_reactions','chat_files','chat_typing','chat_presence','project_files','payroll_processing_settings','payroll_run_items','payroll_documents','payroll_admin_deliveries','attendance_mobile_settings') ORDER BY TABLE_NAME;
+-- Managed employee departments
+CREATE TABLE IF NOT EXISTS departments (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  departmentName VARCHAR(120) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_departments_departmentName (departmentName)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO departments (departmentName)
+SELECT DISTINCT TRIM(department)
+FROM tbl_users
+WHERE department IS NOT NULL AND TRIM(department) <> '';
+
+-- STEP 94 - Verify all 18 new table names
+-- =========================================================
+SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('password_reset_tokens','password_reset_rate_limits','notification_email_outbox','notification_dismissals','chat_conversations','chat_participants','chat_messages','chat_reactions','chat_files','chat_typing','chat_presence','project_files','payroll_processing_settings','payroll_run_items','payroll_documents','payroll_admin_deliveries','attendance_mobile_settings','departments') ORDER BY TABLE_NAME;
 
 -- =========================================================
--- STEP 94 - Verify unique indexes
+-- STEP 95 - Verify unique indexes
 -- =========================================================
 SELECT TABLE_NAME,INDEX_NAME,NON_UNIQUE,COLUMN_NAME,SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME IN ('uq_notification_dedupe','uq_calendar_period','uq_salary_period','uq_salary_calendar','uq_chat_project','uq_payroll_document') ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX;

@@ -73,7 +73,7 @@ const moduleLinks = [
   { key: "calendar", title: "Calendar", permission: MODULE.Payroll },
   { key: "notifications", title: "Notifications", permission: MODULE.Dashboard },
   { key: "roles", title: "Roles & Access", permission: MODULE.UsersManagement },
-  { key: "chat", title: "Chat", permission: MODULE.Dashboard },
+  { key: "chat", title: "Chat", permission: MODULE.Chat },
   { key: "files", title: "Files/Documents", permission: MODULE.Dashboard },
 ];
 
@@ -159,7 +159,7 @@ router.get("/global-search", authenticateToken, async (req: AuthenticatedRequest
     }
 
     // Chat content is always restricted to conversations in which this user participates.
-    if ((!category || ["conversation", "message", "file"].includes(category)) && schema.has("chat_messages") && schema.has("chat_participants") && schema.has("chat_conversations")) {
+    if ((employee || hasPermission(user, MODULE.Chat)) && (!category || ["conversation", "message", "file"].includes(category)) && schema.has("chat_messages") && schema.has("chat_participants") && schema.has("chat_conversations")) {
       for (const [type, module, field] of [["message", "Messages", "content"], ["file", "Files/Documents", "file_name"]] as const) {
         if (category && category !== type) continue;
         const [rows]: any = await pool.query(

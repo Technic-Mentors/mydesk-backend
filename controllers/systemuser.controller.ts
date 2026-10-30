@@ -27,7 +27,6 @@ export const getSytemUsers = async (req: Request, res: Response) => {
       FROM tbl_users u
       LEFT JOIN roles r ON u.roleId = r.id 
       WHERE LOWER(r.roleName) != 'user'
-      AND u.status != 'Inactive'
       ORDER BY u.id ASC
     `);
 
@@ -229,6 +228,25 @@ export const updateSystemUser = async (
   }
 };
 
+export const activateUser = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const [result]: any = await pool.query(
+      "UPDATE tbl_users SET status = 'Active', loginStatus = 'Y' WHERE id = ? AND status = 'Inactive'",
+      [id],
+    );
+
+    if (result.affectedRows === 0) {
+      res.status(404).json({ message: "Inactive user not found" });
+      return;
+    }
+
+    res.json({ message: "User reactivated successfully" });
+  } catch (error) {
+    console.error("Reactivate User Error:", error);
+    res.status(500).json({ message: "Failed to reactivate user" });
+  }
+};
 // ================= DELETE USER =================
 // ================= SOFT DELETE USER =================
 export const deleteUser = async (req: Request, res: Response) => {

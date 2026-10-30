@@ -48,6 +48,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 l.leaveStatus,
                 l.userId,
                 u.name,
+                u.image,
                 'leave_request' AS source
             FROM leaves l
             JOIN tbl_users u ON u.id = l.userId
@@ -63,6 +64,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 a.userId,
                 u.name,
                 u.email,
+                u.image,
                 DATE_FORMAT(a.date, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(a.date, '%Y-%m-%d') AS toDate,
                 a.attendanceStatus,
@@ -103,6 +105,7 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                 leaveStatus: 'Approved',
                 userId: att.userId,
                 name: att.name,
+                image: att.image,
                 source: 'attendance',
                 isFromAttendance: true,
                 attendanceId: att.attendanceId
@@ -155,6 +158,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 l.leaveStatus,
                 l.userId,
                 u.name,
+                u.image,
                 'leave_request' AS source
             FROM leaves l
             JOIN tbl_users u ON u.id = l.userId
@@ -174,6 +178,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 a.userId,
                 u.name,
                 u.email,
+                u.image,
                 DATE_FORMAT(a.date, '%Y-%m-%d') AS fromDate,
                 DATE_FORMAT(a.date, '%Y-%m-%d') AS toDate,
                 a.attendanceStatus,
@@ -214,6 +219,7 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                 leaveStatus: 'Approved',
                 userId: att.userId,
                 name: att.name,
+                image: att.image,
                 source: 'attendance',
                 isFromAttendance: true,
                 attendanceId: att.attendanceId
@@ -586,7 +592,8 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
                  WHERE userId = ?
                  AND date BETWEEN ? AND ?
                  AND status = 'Y'
-                 AND clockIn IS NOT NULL`,
+                 AND LOWER(COALESCE(attendanceStatus, '')) <> 'absent'
+                 AND (clockIn IS NOT NULL OR clockOut IS NOT NULL)`,
                 [userId, fromDate, toDate]
             );
 
@@ -607,7 +614,8 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
                  WHERE userId = ?
                  AND date BETWEEN ? AND ?
                  AND status = 'Y'
-                 AND clockIn IS NOT NULL`,
+                 AND LOWER(COALESCE(attendanceStatus, '')) <> 'absent'
+                 AND (clockIn IS NOT NULL OR clockOut IS NOT NULL)`,
                 [userId, fromDate, toDate]
             );
 
@@ -803,7 +811,8 @@ const leaveApprovalError = async (leave: any): Promise<string | null> => {
     if (!["SHORT LEAVE", "HALF DAY"].includes(leaveType)) {
         const [attendance]: any = await pool.query(
             "SELECT id FROM attendance WHERE userId=? AND date BETWEEN ? AND ? " +
-            "AND status='Y' AND clockIn IS NOT NULL LIMIT 1",
+            "AND status='Y' AND LOWER(COALESCE(attendanceStatus, '')) <> 'absent' " +
+            "AND (clockIn IS NOT NULL OR clockOut IS NOT NULL) LIMIT 1",
             [leave.userId, fromDate, toDate],
         );
         if (attendance.length)

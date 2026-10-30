@@ -24,6 +24,7 @@ export const MODULE = {
   Dynamics: "Dynamics",
   UsersManagement: "Users Management",
   Reports: "Reports",
+  Chat: "Chat",
 } as const;
 
 export const isAdministrator = (user: Principal | null | undefined) =>

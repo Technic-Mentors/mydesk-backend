@@ -5,6 +5,7 @@ import {
   addSystemUser,
   updateSystemUser,
   deleteUser,
+  activateUser,
 } from "../controllers/systemuser.controller";
 import upload from "../middleware/multer";
 
@@ -15,5 +16,6 @@ router.get("/getRoles", getRoles);
 router.post("/addSystemUser", upload.single("image"), addSystemUser);
 router.put("/updateSystemUser/:id", upload.single("image"), updateSystemUser);
 router.delete("/deleteUser/:id", deleteUser);
+router.put("/activateUser/:id", activateUser);
 
 export default router;

@@ -7,10 +7,20 @@ import { authenticateToken, AuthenticatedRequest } from "../middleware/middlewar
 import { notifyUser } from "../services/notificationService";
 import { readChatFile, removeChatFile, writeChatFile } from "../services/chatFiles";
 import { deleteChatConversation } from "../services/deleteChatConversation";
-import { isAdministrator } from "../permissionModel";
+import { hasPermission, isAdministrator, isEmployee, MODULE } from "../permissionModel";
 
 const router = Router();
-router.use(authenticateToken);
+router.use(authenticateToken, (req, res, next) => {
+  // Employees retain the existing default Chat access. System users must have
+  // Chat enabled for their position in Access Control.
+  const user = (req as AuthenticatedRequest).user;
+  if (isEmployee(user) || hasPermission(user, MODULE.Chat)) {
+    next();
+    return;
+  }
+  res.status(403).json({ status: 403, message: "Chat access is not enabled for your position." });
+});
+
 const handle = (fn: (req: AuthenticatedRequest, res: Response) => Promise<unknown>) =>
   asyncHandler(async (req, res) => { await fn(req as AuthenticatedRequest, res); });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });

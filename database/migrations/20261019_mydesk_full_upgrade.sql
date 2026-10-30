@@ -378,10 +378,25 @@ SELECT names.moduleName FROM (
 ) AS names
 WHERE NOT EXISTS (SELECT 1 FROM modules m WHERE m.moduleName = names.moduleName);
 
+-- Managed employee departments
+CREATE TABLE IF NOT EXISTS departments (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  departmentName VARCHAR(120) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_departments_departmentName (departmentName)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO departments (departmentName)
+SELECT DISTINCT TRIM(department)
+FROM tbl_users
+WHERE department IS NOT NULL AND TRIM(department) <> '';
+
 -- Verification
 SELECT
   (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance_mobile_settings') AS mobile_settings_table,
   (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'password_reset_tokens') AS password_reset_table,
   (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'notification_email_outbox') AS notification_outbox_table,
   (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_conversations') AS chat_table,
-  (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payroll_documents') AS payroll_documents_table;
+  (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payroll_documents') AS payroll_documents_table,
+  (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'departments') AS departments_table;

@@ -23,6 +23,15 @@ SELECT 1 FROM access_control LIMIT 0;
 
 -- 2. New independent and dependent tables
 -- =========================================================
+-- Managed employee departments
+CREATE TABLE IF NOT EXISTS departments (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  departmentName VARCHAR(120) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_departments_departmentName (departmentName)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Authentication and password reset
 -- =========================================================
 
@@ -249,6 +258,11 @@ SELECT IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = D
 PREPARE mydesk_stmt FROM @mydesk_ddl;
 EXECUTE mydesk_stmt;
 DEALLOCATE PREPARE mydesk_stmt;
+
+INSERT IGNORE INTO departments (departmentName)
+SELECT DISTINCT TRIM(department)
+FROM tbl_users
+WHERE department IS NOT NULL AND TRIM(department) <> '';
 
 -- Notification Table Updates
 -- Existing dump has message VARCHAR(255); current notices can exceed that.
@@ -743,6 +757,7 @@ FROM (
   UNION ALL SELECT 'payroll_documents'
   UNION ALL SELECT 'payroll_admin_deliveries'
   UNION ALL SELECT 'attendance_mobile_settings'
+  UNION ALL SELECT 'departments'
 ) AS expected
 LEFT JOIN information_schema.TABLES actual
   ON actual.TABLE_SCHEMA = DATABASE() AND actual.TABLE_NAME = expected.table_name
@@ -790,6 +805,6 @@ SELECT 'MyDesk database migration completed' AS migration_status,
        DATABASE() AS selected_database,
        (SELECT COUNT(*) FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME IN ('password_reset_tokens', 'password_reset_rate_limits', 'notification_email_outbox', 'notification_dismissals', 'chat_conversations', 'chat_participants', 'chat_messages', 'chat_reactions', 'chat_files', 'chat_typing', 'chat_presence', 'project_files', 'payroll_processing_settings', 'payroll_run_items', 'payroll_documents', 'payroll_admin_deliveries', 'attendance_mobile_settings')) AS required_new_tables_present,
-       17 AS required_new_tables_expected;
+          AND TABLE_NAME IN ('password_reset_tokens', 'password_reset_rate_limits', 'notification_email_outbox', 'notification_dismissals', 'chat_conversations', 'chat_participants', 'chat_messages', 'chat_reactions', 'chat_files', 'chat_typing', 'chat_presence', 'project_files', 'payroll_processing_settings', 'payroll_run_items', 'payroll_documents', 'payroll_admin_deliveries', 'attendance_mobile_settings', 'departments')) AS required_new_tables_present,
+       18 AS required_new_tables_expected;
 
