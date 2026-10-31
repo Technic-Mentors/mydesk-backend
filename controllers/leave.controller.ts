@@ -78,7 +78,6 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
 
         const [attendanceRows] = await pool.query<RowDataPacket[]>(attendanceQuery, [`%${search}%`]);
 
-        console.log(`📊 Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
 
         // Match attendance leave against the full range of each request.
         // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
@@ -90,9 +89,6 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
                     leave.fromDate <= att.fromDate &&
                     leave.toDate >= att.fromDate
                 );
-                if (hasLeave) {
-                    console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
-                }
                 return !hasLeave;
             })
             .map((att: any) => ({
@@ -119,7 +115,6 @@ export const getUsersLeaves = async (req: AuthenticatedRequest, res: Response) =
             return new Date(b.fromDate).getTime() - new Date(a.fromDate).getTime();
         });
 
-        console.log(`✅ Returning ${mergedLeaves.length} total leaves (${leaveRows.length} from leaves, ${transformedAttendance.length} from attendance)`);
         res.json(mergedLeaves);
     } catch (error) {
         console.error("❌ Error in getUsersLeaves:", error);
@@ -192,7 +187,6 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
 
         const [attendanceRows] = await pool.query<RowDataPacket[]>(attendanceQuery, [userId]);
 
-        console.log(`📊 User ${userId}: Found ${leaveRows.length} regular leaves and ${attendanceRows.length} attendance leaves`);
 
         // Match attendance leave against the full range of each request.
         // 3️⃣ Transform attendance records - BUT ONLY IF NO LEAVE EXISTS FOR THAT DATE
@@ -204,9 +198,6 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
                     leave.fromDate <= att.fromDate &&
                     leave.toDate >= att.fromDate
                 );
-                if (hasLeave) {
-                    console.log(`⏭️ Skipping attendance ${att.attendanceId} for user ${att.userId} on ${att.fromDate} - Leave already exists`);
-                }
                 return !hasLeave;
             })
             .map((att: any) => ({
@@ -233,7 +224,6 @@ export const getMyLeaves = async (req: AuthenticatedRequest, res: Response) => {
             return new Date(b.fromDate).getTime() - new Date(a.fromDate).getTime();
         });
 
-        console.log(`✅ User ${userId}: Returning ${mergedLeaves.length} total leaves (${leaveRows.length} from leaves, ${transformedAttendance.length} from attendance)`);
         res.json(mergedLeaves);
     } catch (error) {
         console.error("❌ Error in getMyLeaves:", error);
@@ -619,10 +609,6 @@ export const addLeave = async (req: AuthenticatedRequest, res: Response) => {
                 [userId, fromDate, toDate]
             );
 
-            if (attendanceCheck.length > 0) {
-                console.log(`✅ ${leaveTypeValue} leave applied with existing attendance for user ${userId}`);
-                console.log(`📊 Attendance records:`, attendanceCheck);
-            }
         }
 
         // ============================================================
@@ -1007,7 +993,6 @@ export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) =>
 
         const updatedLeave = (updatedRows as any[])[0];
 
-        console.log(`✅ Leave ${id} updated by employee ${req.user.name}`);
 
         res.status(200).json({
             success: true,

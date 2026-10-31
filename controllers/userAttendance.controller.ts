@@ -288,14 +288,10 @@ export const addAttendance = async (
     remoteApprovedBy
   } = req.body;
 
-  console.log("🚀 ========== ADD ATTENDANCE START ==========");
-  console.log("📝 Request params:", { userId });
-  console.log("📝 Request body:", req.body);
 
   try {
     const userIdNum = parseInt(userId);
     if (!userIdNum || !date || !manualStatus) {
-      console.log("❌ Validation failed: Missing required fields");
       res
         .status(400)
         .json({ success: false, message: "Missing required fields" });
@@ -304,16 +300,13 @@ export const addAttendance = async (
 
     const formattedDate = toMySQLDate(date);
     if (!formattedDate) {
-      console.log("❌ Validation failed: Invalid date format");
       res.status(400).json({ success: false, message: "Invalid date format" });
       return;
     }
 
-    console.log(`✅ Validated: userId=${userIdNum}, date=${formattedDate}, status=${manualStatus}`);
 
     const rule = await getAttendanceRule();
     if (!rule) {
-      console.log("❌ No active attendance rule found");
       res.status(400).json({
         success: false,
         message: "No active attendance rule found on server.",
@@ -329,7 +322,6 @@ export const addAttendance = async (
       }).format(dateObj);
 
       if (dayName.toLowerCase() === rule.offDay.toLowerCase()) {
-        console.log(`❌ Cannot add attendance on ${rule.offDay} (Weekly Off)`);
         res.status(400).json({
           success: false,
           message: `Cannot add attendance on ${rule.offDay} (Weekly Off)`,
@@ -366,7 +358,6 @@ export const addAttendance = async (
         return;
       }
     } else if (existing.length > 0) {
-      console.log(`❌ Attendance already exists for user ${userIdNum} on ${formattedDate}`);
       res.status(400).json({
         success: false,
         message: "Attendance already exists for this date of this Employee",
@@ -374,16 +365,13 @@ export const addAttendance = async (
       return;
     }
 
-    console.log(`📊 Initial status: ${manualStatus}, Final status after toLowerCase: ${finalStatus}`);
 
     if (clockIn && clockOut) {
       workingHours = calculateWorkingHours(clockIn, clockOut);
-      console.log(`📊 Working hours calculated: ${workingHours}`);
     }
 
     if (finalStatus === "present") {
       if (!clockIn ) {
-        console.log("❌ Clock In required for 'Present'");
         res.status(400).json({
           success: false,
           message: "Clock In required for 'Present'",
@@ -392,14 +380,11 @@ export const addAttendance = async (
       }
       if (rule.halfLeave && clockIn >= rule.halfLeave) {
         finalStatus = "half leave";
-        console.log(`📊 Status changed to: ${finalStatus} (Half Leave)`);
       } else if (rule.lateTime && clockIn >= rule.lateTime) {
         finalStatus = "late";
-        console.log(`📊 Status changed to: ${finalStatus} (Late)`);
       }
     }
 
-    console.log(`📊 Final status before INSERT: ${finalStatus}`);
 
     // ✅ Insert attendance
     const pendingLeave = await findPendingLeaveForDate(Number(userId), formattedDate);
@@ -428,7 +413,6 @@ export const addAttendance = async (
       return;
     }
 
-    console.log("📝 Inserting attendance record...");
     const connection = await pool.getConnection();
     let attendanceId: number;
     let approvedLeaveId: number | null = null;

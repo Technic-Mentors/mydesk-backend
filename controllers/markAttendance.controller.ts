@@ -486,10 +486,9 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         // 4️⃣ IF FULL DAY LEAVE - Auto mark attendance as "Leave"
         // ============================================================
         if (isFullDayLeave && !hasLeaveAttendance) {
-            console.log(`✅ User ${userId} has FULL DAY leave on ${today}. Auto-marking as "Leave" attendance.`);
             
             // ✅ Auto-create attendance with status "Leave" (no clock in/out)
-            const result = await pool.query(
+            await pool.query(
                 `INSERT INTO attendance 
                  (userId, date, clockIn, clockOut, attendanceStatus, workingHours, status,
                   latitude, longitude, clockInLatitude, clockInLongitude) 
@@ -497,8 +496,6 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
                 [userId, today, latitude, longitude, latitude, longitude]
             );
 
-            const insertId = (result[0] as any).insertId;
-            console.log(`✅ Auto-created leave attendance record ID: ${insertId} for user ${userId} on ${today}`);
 
             // ✅ Also ensure leave record exists (already exists, but just in case)
             // The leave is already in the leaves table from admin approval
