@@ -175,6 +175,35 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             return;
         }
 
+        // Check saved attendance before holiday or weekly-off rules. An employee
+        // may already have clocked in before a holiday/profile change, and must
+        // still be able to see and clock out of that open record.
+        const [rows]: any = await pool.query(
+            `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus,
+                    latitude, longitude, clockInLatitude, clockInLongitude,
+                    clockOutLatitude, clockOutLongitude, status,
+                    type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate,
+                    remoteReason, remoteApprovedBy, remoteApprovedAt, remoteRejectedReason
+             FROM attendance
+             WHERE userId = ? AND date = ? AND status = 'Y'
+             ORDER BY id ASC`,
+            [userId, today],
+        );
+
+        if (rows && rows.length > 0) {
+            const latestRecord = rows[rows.length - 1];
+            const openRecord = rows.find((r: any) => r.clockIn !== null && r.clockOut === null) || null;
+            const activeRecord = openRecord || latestRecord;
+            res.status(200).json({
+                ...activeRecord,
+                cycles: rows,
+                date: activeRecord?.date
+                    ? moment.tz(activeRecord.date, "Asia/Karachi").format("YYYY-MM-DD")
+                    : today,
+            });
+            return;
+        }
+
         // ============================================================
         // 4️⃣ Check if today is a holiday
         // ============================================================
@@ -220,18 +249,6 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
         // ============================================================
         // 6️⃣ Get attendance with remote fields (ALL records for today)
         // ============================================================
-        const [rows]: any = await pool.query(
-            `SELECT id, userId, clockIn, clockOut, workingHours, date, attendanceStatus, 
-                    latitude, longitude, clockInLatitude, clockInLongitude, 
-                    clockOutLatitude, clockOutLongitude, status,
-                    type, remoteStatus, remoteRequestDate, remoteFromDate, remoteToDate, 
-                    remoteReason, remoteApprovedBy, remoteApprovedAt, remoteRejectedReason
-             FROM attendance 
-             WHERE userId = ? AND date = ? AND status = 'Y'
-             ORDER BY id ASC`,
-            [userId, today],
-        );
-
         if (!rows || rows.length === 0) {
             // ✅ Only mark "Absent" once the configured late-threshold time has
             // passed. Before office start time (or within the grace/late
@@ -253,19 +270,7 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             return;
         }
 
-        // ✅ Get the latest record for the "current" state
-        const latestRecord = rows[rows.length - 1];
-        const openRecord = rows.find((r: any) => r.clockIn !== null && r.clockOut === null) || null;
-        const activeRecord = openRecord || latestRecord;
-
-        // ✅ Return ALL records with cycles
-        const record = {
-            ...activeRecord,
-            cycles: rows,  // ✅ ALL records for today
-            date: activeRecord?.date ? moment.tz(activeRecord.date, "Asia/Karachi").format("YYYY-MM-DD") : today
-        };
-
-        res.status(200).json(record);
+        // Saved rows were returned before holiday and weekly-off checks above.
     } catch (error) {
         console.error("Get Attendance Error:", error);
         if (!res.headersSent) {
