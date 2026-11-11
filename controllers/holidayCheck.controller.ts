@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import pool from "../database/db";
 import moment from "moment-timezone";
+import { getAttendancePolicy } from "../services/attendanceProfiles";
 
 export const checkHoliday = async (
   req: Request,
@@ -34,12 +35,21 @@ export const checkHoliday = async (
     }
 
     // ✅ Check if date is a weekly off day
-    const [rules]: any = await pool.query(
-      "SELECT offDay FROM attendance_rules WHERE status = 'Active' LIMIT 1",
-    );
+    const userId = Number(req.query.userId);
+    const employeePolicy = Number.isSafeInteger(userId) && userId > 0
+      ? await getAttendancePolicy(userId)
+      : null;
+    let defaultOffDay = "";
+    if (!employeePolicy) {
+      const [rules]: any = await pool.query(
+        "SELECT offDay FROM attendance_rules WHERE status = 'Active' LIMIT 1",
+      );
+      defaultOffDay = rules[0]?.offDay || "";
+    }
+    const configuredOffDays = employeePolicy?.offDay || defaultOffDay;
 
-    if (rules.length > 0) {
-      const offDays = rules[0].offDay.split(',').map((day: string) => day.trim().toLowerCase());
+    if (configuredOffDays) {
+      const offDays = configuredOffDays.split(',').map((day: string) => day.trim().toLowerCase());
       
       if (offDays.includes(dayName.toLowerCase())) {
         res.status(200).json({

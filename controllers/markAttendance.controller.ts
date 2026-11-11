@@ -3,45 +3,7 @@ import pool from "../database/db";
 import moment from "moment-timezone";
 import { assessGeofence, validCoordinates } from "../utils/geofence";
 import { getMobileClockSettings, isMobileAttendanceRequest } from "./attendanceMobileSettings.controller";
-
-// Helper function to determine attendance status
-const determineAttendanceStatus = (
-    clockIn: string,
-    clockOut: string,
-    startTime: string,
-    endTime: string,
-    lateTime: string,
-    halfLeaveTime: string,
-    shortLeaveThresholdMinutes: number,
-    currentStatus: string
-): string => {
-    const clockInMoment = moment(clockIn, "HH:mm:ss");
-    const clockOutMoment = moment(clockOut, "HH:mm:ss");
-    const startMoment = moment(startTime, "HH:mm:ss");
-    const endMoment = moment(endTime, "HH:mm:ss");
-    
-    const totalMinutesWorked = clockOutMoment.diff(clockInMoment, "minutes");
-    const expectedShiftMinutes = endMoment.diff(startMoment, "minutes");
-    const percentageCompleted = (totalMinutesWorked / expectedShiftMinutes) * 100;
-
-    if (totalMinutesWorked < 30) {
-        return "Absent";
-    }
-    
-    if (totalMinutesWorked < shortLeaveThresholdMinutes) {
-        return "Short Leave";
-    }
-    
-    if (percentageCompleted <= 50) {
-        return "Half Leave";
-    }
-    
-    if (clockInMoment.isAfter(moment(lateTime, "HH:mm:ss"))) {
-        return "Late";
-    }
-    
-    return "Present";
-};
+import { getAttendancePolicy, resolveClockInStatus } from "../services/attendanceProfiles";
 
 // ============================================================
 // GET ATTENDANCE (Employee) - WITH LEAVE CHECK
@@ -233,22 +195,20 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
         // ============================================================
         // 5️⃣ Check attendance rules for weekly off
         // ============================================================
-        const [rules]: any = await pool.query(
-            "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1",
-        );
+        const attendancePolicy = await getAttendancePolicy(Number(userId));
 
-        if (!rules.length) {
+        if (!attendancePolicy) {
             res.status(400).json({
                 message: "Firstly configure Attendance Rule.",
             });
             return;
         }
 
-        if (rules.length) {
-            const { offDay } = rules[0];
+        if (attendancePolicy) {
+            const { offDay } = attendancePolicy;
             const todayDayName = moment.tz("Asia/Karachi").format("dddd");
-
-            if (offDay && todayDayName.toLowerCase() === offDay.toLowerCase()) {
+            const offDays = offDay.split(",").map((day) => day.trim().toLowerCase());
+            if (offDays.includes(todayDayName.toLowerCase())) {
                 res.status(200).json({
                     attendanceStatus: "Holiday",
                     message: `${offDay} is Weekly Off`,
@@ -277,7 +237,7 @@ export const getAttendance = async (req: Request, res: Response): Promise<void> 
             // passed. Before office start time (or within the grace/late
             // window), the employee simply hasn't had the chance to clock in
             // yet, so leave the status unset instead of jumping to "Absent".
-            const { lateTime } = rules[0];
+            const { lateTime } = attendancePolicy;
             const currentTime = moment.tz("Asia/Karachi").format("HH:mm:ss");
             const isPastLateThreshold = !!lateTime && currentTime >= lateTime;
 
@@ -420,10 +380,11 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         // ============================================================
         // 2.5️⃣ FETCH ACTIVE ATTENDANCE RULE (late time + office geofence)
         // ============================================================
-        const [ruleRows]: any = await pool.query(
-            "SELECT * FROM attendance_rules WHERE status = 'Active' LIMIT 1"
-        );
-        const activeRule = ruleRows.length > 0 ? ruleRows[0] : null;
+        const activeRule = await getAttendancePolicy(Number(userId));
+        if (!activeRule) {
+            res.status(400).json({ message: "Firstly configure Attendance Rule." });
+            return;
+        }
 
         // ✅ Check if user has an APPROVED remote-work request covering today
         const [approvedRemoteRows]: any = await pool.query(
@@ -656,12 +617,7 @@ export const markAttendance = async (req: Request, res: Response): Promise<void>
         } else if (hasApprovedLeave && leaveType === 'HALF DAY') {
             attendanceStatus = "Present";
         } else {
-            // Check for late
-            if (activeRule && currentTime > activeRule.lateTime) {
-                attendanceStatus = "Late";
-            } else {
-                attendanceStatus = "Present";
-            }
+            attendanceStatus = resolveClockInStatus(currentTime, activeRule);
         }
 
         // ✅ INSERT new attendance record

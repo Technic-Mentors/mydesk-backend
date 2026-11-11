@@ -118,6 +118,7 @@ securedMount(app, "/api/admin", attendanceRuleRoutes, MODULE.Configuration, [
   { path: /^\/getTimeConfigured$/i },
 ], [
   { path: /^\/getTimeConfigured$/i, module: MODULE.Reports, methods: ["GET"] },
+  { path: /^\/attendance-profiles$/i, module: MODULE.People, methods: ["GET"] },
 ]);
 securedMount(app, "/api/admin", markAttendanceRoutes, MODULE.Attendance, [
   { path: /^\/(?:getAttendance|markAttendance)\/(\d+)$/i, ownerParam: "id" },

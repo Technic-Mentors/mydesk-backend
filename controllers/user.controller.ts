@@ -5,6 +5,7 @@ import { randomBytes } from "crypto";
 import { employeeNotice, welcomeEmployee } from "../services/employeeNotificationEvents";
 import cloudinary, { uploadToCloudinary } from "../utils/cloudinary";
 import { AuthenticatedRequest } from "../middleware/middleware";
+import { ensureAttendanceProfileSchema } from "../services/attendanceProfiles";
 const formattedDate = new Date().toLocaleDateString("sv-SE");
 export const updateProfileImage = async (
   req: AuthenticatedRequest,
@@ -57,17 +58,23 @@ export const getAllUsers = async (
   res: Response,
 ): Promise<void> => {
   try {
+    await ensureAttendanceProfileSchema();
     const [rows]: any = await pool.query(
       `SELECT 
         u.id, u.email, u.role, u.name, u.contact, u.salary, u.cnic,
         u.address, u.date, u.department, u.reporting_manager, u.image, u.loginStatus, u.created_at,
         u.updated_at, u.roleId, u.status,
+        ap.profileId AS attendanceProfileId, p.name AS attendanceProfileName,
+        p.lateTime AS attendanceLateTime, p.halfLeave AS attendanceHalfLeave,
+        p.offDays AS attendanceOffDays,
         (SELECT el.position 
          FROM employee_lifeline el 
          WHERE el.employee_id = u.id 
          ORDER BY el.date DESC, el.id DESC 
          LIMIT 1) AS position
        FROM tbl_users u
+       LEFT JOIN employee_attendance_profiles ap ON ap.userId = u.id
+       LEFT JOIN attendance_profiles p ON p.id = ap.profileId
        WHERE LOWER(u.role) = 'user' AND COALESCE(u.status, '') <> 'Deleted'`,
     );
     res.json({ users: rows });
@@ -81,7 +88,7 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
   const connection = await pool.getConnection();
   let uploadedImagePublicId: string | null = null;
   try {
-    let { name, email, contact, cnic, address, date, role, position, department, reportingManager } =
+    let { name, email, contact, cnic, address, date, role, position, department, reportingManager, attendanceProfileId } =
       req.body;
 
     // Validation...
@@ -93,6 +100,13 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
     if (!/^\d{11}$/.test(contact)) {
       res.status(400).json({ message: "Contact must be exactly 11 digits" });
       return;
+    }
+
+    await ensureAttendanceProfileSchema();
+    if (attendanceProfileId) {
+      const [profiles]: any = await pool.query("SELECT id FROM attendance_profiles WHERE id=? AND status='Active'", [Number(attendanceProfileId)]);
+      if (!profiles.length) { res.status(400).json({ message: "Select an active attendance profile" }); return; }
+      attendanceProfileId = Number(attendanceProfileId);
     }
 
     // Validate the optional image before creating the employee.
@@ -179,6 +193,10 @@ export const addUser = async (req: Request, res: Response): Promise<void> => {
 
       const newUserId = userResult.insertId;
 
+      if (attendanceProfileId) {
+        await connection.query("INSERT INTO employee_attendance_profiles (userId, profileId) VALUES (?, ?)", [newUserId, attendanceProfileId]);
+      }
+
       // ✅ STEP 2: Auto-create employee_lifeline entry with the position (only for non-admins)
       if (role !== "admin") {
         await connection.query(
@@ -234,11 +252,25 @@ export const updateUser = async (
 ): Promise<void> => {
   try {
     const userId = req.params.id;
-    let { name, email, contact, cnic, address, role, date, position, department, reportingManager, status } = req.body;
+    let { name, email, contact, cnic, address, role, date, position, department, reportingManager, status, attendanceProfileId } = req.body;
+    const assignmentProvided = Object.prototype.hasOwnProperty.call(req.body, "attendanceProfileId");
 
     if (!userId) {
       res.status(400).json({ message: "User ID is required" });
       return;
+    }
+
+    if (assignmentProvided) {
+      await ensureAttendanceProfileSchema();
+      if (attendanceProfileId) {
+        const [profiles]: any = await pool.query(
+          `SELECT p.id FROM attendance_profiles p WHERE p.id=? AND (p.status='Active' OR EXISTS (
+             SELECT 1 FROM employee_attendance_profiles a WHERE a.userId=? AND a.profileId=p.id))`,
+          [Number(attendanceProfileId), Number(userId)],
+        );
+        if (!profiles.length) { res.status(400).json({ message: "Select an active attendance profile" }); return; }
+        attendanceProfileId = Number(attendanceProfileId);
+      }
     }
 
     // ✅ Validate contact (if provided)
@@ -332,6 +364,17 @@ export const updateUser = async (
     const values = [...Object.values(updates), userId];
 
     await pool.query(query, values);
+    if (assignmentProvided) {
+      if (attendanceProfileId) {
+        await pool.query(
+          `INSERT INTO employee_attendance_profiles (userId, profileId) VALUES (?, ?)
+           ON DUPLICATE KEY UPDATE profileId=VALUES(profileId)`,
+          [Number(userId), Number(attendanceProfileId)],
+        );
+      } else {
+        await pool.query("DELETE FROM employee_attendance_profiles WHERE userId=?", [Number(userId)]);
+      }
+    }
     const changed: string[] = [];
     for (const [key,label] of [["status","Employment status"],["date","Joining date"],["department","Department"],["reporting_manager","Reporting manager"]] as const) {
       if (updates[key] !== undefined && String(updates[key]) !== String(userRows[0][key])) changed.push(`${label}: ${userRows[0][key]} to ${updates[key]}`);

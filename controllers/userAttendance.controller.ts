@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import pool from "../database/db";
 import { RowDataPacket, ResultSetHeader } from "mysql2";
 import { adminAttendanceRecorded, adminAttendanceUpdated, decisionEvent, nonCriticalNotification } from "../services/notificationEvents";
+import { getAttendancePolicy, ensureAttendanceProfileSchema, isHalfLeaveAuthorized, resolveClockInStatus } from "../services/attendanceProfiles";
 
 const toMySQLDate = (dateStr: string | null): string | null => {
   if (!dateStr) return null;
@@ -62,6 +63,18 @@ const findPendingLeaveForDate = async (userId: number, date: string): Promise<Ro
   return rows[0] || null;
 };
 
+const hasApprovedHalfDayLeave = async (userId: number, date: string): Promise<boolean> => {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM leaves
+     WHERE userId = ? AND status = 'Y' AND LOWER(leaveStatus) = 'approved'
+       AND ? BETWEEN fromDate AND toDate
+       AND UPPER(COALESCE(NULLIF(leaveType, ''), leaveSubject, '')) = 'HALF DAY'
+     LIMIT 1`,
+    [userId, date],
+  );
+  return rows.length > 0;
+};
+
 const approveOrCreateAttendanceLeave = async (
   connection: any, userId: number, date: string, attendanceStatus: string, createWhenMissing: boolean,
 ): Promise<number | null> => {
@@ -108,12 +121,9 @@ const calculateWorkingHours = (
   }
 };
 
-const getAttendanceRule = async (): Promise<any | null> => {
+const getAttendanceRule = async (userId: number): Promise<any | null> => {
   try {
-    const [rows]: any = await pool.query(
-      "SELECT * FROM attendance_rules WHERE status = 'Active' ORDER BY id DESC LIMIT 1",
-    );
-    return rows.length ? rows[0] : null;
+    return await getAttendancePolicy(userId);
   } catch (error) {
     console.error("❌ Error fetching attendance rule:", error);
     throw error;
@@ -125,6 +135,7 @@ const getAttendanceRule = async (): Promise<any | null> => {
 // ============================================================
 export const getUsers = async (req: Request, res: Response): Promise<void> => {
   try {
+    await ensureAttendanceProfileSchema();
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT 
         id, 
@@ -141,9 +152,18 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
         position,
         salary,
         created_at,
-        updated_at
-      FROM tbl_users 
-      WHERE LOWER(role) = 'user'`
+        updated_at,
+        ap.profileId AS attendanceProfileId,
+        p.name AS attendanceProfileName,
+        p.startTime AS attendanceStartTime,
+        p.endTime AS attendanceEndTime,
+        p.lateTime AS attendanceLateTime,
+        p.halfLeave AS attendanceHalfLeave,
+        p.offDays AS attendanceOffDays
+      FROM tbl_users u
+      LEFT JOIN employee_attendance_profiles ap ON ap.userId = u.id
+      LEFT JOIN attendance_profiles p ON p.id = ap.profileId
+      WHERE LOWER(u.role) = 'user'`
     );
     const selectedDate = typeof req.query.date === "string" ? toMySQLDate(req.query.date) : null;
     if (!selectedDate) {
@@ -177,6 +197,19 @@ export const getUsers = async (req: Request, res: Response): Promise<void> => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Failed to fetch users." });
+  }
+};
+
+export const getMyAttendancePolicy = async (req: Request, res: Response): Promise<void> => {
+  const userId = Number((req as Request & { user?: { id?: number } }).user?.id);
+  if (!userId) { res.status(401).json({ message: "Unauthorized" }); return; }
+  try {
+    const policy = await getAttendancePolicy(userId);
+    if (!policy) { res.status(404).json({ message: "No active attendance rule is configured" }); return; }
+    res.json(policy);
+  } catch (error) {
+    console.error("Failed to load employee attendance policy:", error);
+    res.status(500).json({ message: "Failed to load attendance profile" });
   }
 };
 // ============================================================
@@ -305,7 +338,7 @@ export const addAttendance = async (
     }
 
 
-    const rule = await getAttendanceRule();
+    const rule = await getAttendanceRule(userIdNum);
     if (!rule) {
       res.status(400).json({
         success: false,
@@ -321,7 +354,7 @@ export const addAttendance = async (
         weekday: "long",
       }).format(dateObj);
 
-      if (dayName.toLowerCase() === rule.offDay.toLowerCase()) {
+      if (rule.offDay.split(",").some((day: string) => day.trim().toLowerCase() === dayName.toLowerCase())) {
         res.status(400).json({
           success: false,
           message: `Cannot add attendance on ${rule.offDay} (Weekly Off)`,
@@ -378,11 +411,7 @@ export const addAttendance = async (
         });
         return;
       }
-      if (rule.halfLeave && clockIn >= rule.halfLeave) {
-        finalStatus = "half leave";
-      } else if (rule.lateTime && clockIn >= rule.lateTime) {
-        finalStatus = "late";
-      }
+      finalStatus = resolveClockInStatus(clockIn, rule).toLowerCase();
     }
 
 
@@ -409,6 +438,19 @@ export const addAttendance = async (
         code: "APPROVED_LEAVE_REQUIRES_REJECTION",
         leaveId: approvedLeave.id,
         message: "Reject the approved leave request before changing attendance status.",
+      });
+      return;
+    }
+
+    if (String(manualStatus).trim().toLowerCase() === "half leave" &&
+        !isHalfLeaveAuthorized(
+          await hasApprovedHalfDayLeave(userIdNum, formattedDate),
+          !!pendingLeave && applicableStatus === "half leave",
+        )) {
+      res.status(409).json({
+        success: false,
+        code: "HALF_LEAVE_REQUIRES_APPROVED_LEAVE",
+        message: "Half Leave attendance requires an approved Half Day leave request.",
       });
       return;
     }
@@ -614,7 +656,7 @@ export const updateAttendance = async (
       return;
     }
 
-    const rule = await getAttendanceRule();
+    const rule = await getAttendanceRule(Number(userId));
 
     let finalStatus = reqStatus?.toLowerCase();
     let workingHours = null;
@@ -651,11 +693,7 @@ export const updateAttendance = async (
 
     // ✅ Auto-adjust status based on rules (only for 'present')
     if (finalStatus === "present" && rule) {
-      if (rule.halfLeave && clockIn && clockIn >= rule.halfLeave) {
-        finalStatus = "half leave";
-      } else if (rule.lateTime && clockIn && clockIn >= rule.lateTime) {
-        finalStatus = "late";
-      }
+      if (clockIn) finalStatus = resolveClockInStatus(clockIn, rule).toLowerCase();
     }
 
     // ✅ Update with remote fields - clockOut can be null
@@ -681,6 +719,19 @@ export const updateAttendance = async (
         code: "APPROVED_LEAVE_REQUIRES_REJECTION",
         leaveId: approvedLeave.id,
         message: "Reject the approved leave request before changing attendance status.",
+      });
+      return;
+    }
+
+    if (String(reqStatus).trim().toLowerCase() === "half leave" &&
+        !isHalfLeaveAuthorized(
+          await hasApprovedHalfDayLeave(Number(userId), formattedDate),
+          !!pendingLeave && applicableStatus === "half leave",
+        )) {
+      res.status(409).json({
+        success: false,
+        code: "HALF_LEAVE_REQUIRES_APPROVED_LEAVE",
+        message: "Half Leave attendance requires an approved Half Day leave request.",
       });
       return;
     }

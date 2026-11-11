@@ -7,6 +7,7 @@ import {
   updateAttendance,
   deleteAttendance,
   getAttendanceByUserAndDate,
+  getMyAttendancePolicy,
 } from "../controllers/userAttendance.controller";
 
 import { authenticateToken, isAdmin } from "../middleware/middleware";
@@ -21,6 +22,7 @@ router.get(
   getAllAttendances
 );
 router.get("/user/getMyAttendances", authenticateToken, getMyAttendances);
+router.get("/user/getMyAttendancePolicy", authenticateToken, getMyAttendancePolicy);
 router.post("/admin/addAttendance/:userId", authenticateToken, isAdmin, addAttendance);
 router.patch("/admin/updateAttendance/:id", authenticateToken, isAdmin, updateAttendance);
 router.patch("/admin/deleteAttendance/:id", authenticateToken, isAdmin, deleteAttendance);

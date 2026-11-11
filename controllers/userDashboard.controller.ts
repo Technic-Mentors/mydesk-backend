@@ -4,6 +4,7 @@ import { RowDataPacket } from "mysql2";
 import moment from "moment-timezone";
 import { attendanceStartDate, countAttendanceWindow } from "../utils/attendanceEligibility";
 import { isRecordedAttendanceOverride, normalizeAttendanceStatus } from "../utils/attendanceStatus";
+import { getAttendancePolicy } from "../services/attendanceProfiles";
 
 export const getUserDashboard = async (
   req: any,
@@ -29,14 +30,12 @@ export const getUserDashboard = async (
     // ============================================================
     // 0️⃣ ACTIVE RULE (lateTime + offDay)
     // ============================================================
-    const [ruleRows] = await pool.query<RowDataPacket[]>(
-      `SELECT offDay, lateTime FROM attendance_rules WHERE status = 'Active' LIMIT 1`
-    );
-    const offDays: string[] = (ruleRows[0]?.offDay || "")
+    const rule = await getAttendancePolicy(Number(userId));
+    const offDays: string[] = (rule?.offDay || "")
       .split(",")
       .map((d: string) => d.trim())
       .filter(Boolean);
-    const lateTime: string = ruleRows[0]?.lateTime || "23:59:59";
+    const lateTime: string = rule?.lateTime || "23:59:59";
 
     // Aaj (Asia/Karachi) — markAttendance bhi isi timezone mein save karta hai
     const todayStr = moment.tz("Asia/Karachi").format("YYYY-MM-DD");

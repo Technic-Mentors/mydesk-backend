@@ -25,7 +25,14 @@ async function scenario(
   let rolledBack = false;
 
   (pool as any).query = async (sql: string) => {
-    if (sql.includes("FROM attendance_rules")) return [[{}]];
+    if (sql.includes("FROM tbl_users u")) return [[{
+      profileId: null,
+      defaultLateTime: "09:10:00",
+      defaultHalfLeave: "13:00:00",
+      defaultStartTime: "09:00:00",
+      defaultEndTime: "17:00:00",
+      defaultOffDay: "Sunday",
+    }]];
     if (sql.includes("SELECT * FROM attendance WHERE id")) return [[{ id: 8, type: "Onsite" }]];
     if (sql.includes("SELECT id, attendanceStatus FROM attendance")) return [[]];
     if (sql.includes("leaveStatus = 'Pending'")) return [leaveStatus === "Pending" ? [{ id: 31, leaveType }] : []];
@@ -112,6 +119,17 @@ async function scenario(
   assert.equal(newLeave.reply.code, 201);
   assert.equal(newLeave.createdLeave, true);
   assert.equal(newLeave.committed, true);
+
+  for (const mode of ["add", "update"] as const) {
+    const unapprovedHalfLeave = await scenario("None", "half leave", mode);
+    assert.equal(unapprovedHalfLeave.reply.code, 409);
+    assert.equal(unapprovedHalfLeave.reply.body.code, "HALF_LEAVE_REQUIRES_APPROVED_LEAVE");
+    assert.equal(unapprovedHalfLeave.wroteAttendance, false);
+
+    const approvedHalfLeave = await scenario("Approved", "half leave", mode, false, "HALF DAY");
+    assert.equal(approvedHalfLeave.reply.code, mode === "add" ? 201 : 200);
+    assert.equal(approvedHalfLeave.wroteAttendance, true);
+  }
 
   const failed = await scenario("Pending", "full day", "add", true);
   assert.equal(failed.reply.code, 500);
