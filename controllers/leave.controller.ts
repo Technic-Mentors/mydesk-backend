@@ -2,9 +2,11 @@ import { Request as ExpressRequest, Response } from "express";
 import pool from "../database/db";
 import { hasPermission, MODULE } from "../permissionModel";
 import { OkPacket, RowDataPacket } from "mysql2";
+import { PoolConnection } from "mysql2/promise";
 import { AuthenticatedRequest } from "../middleware/middleware";
 import moment from "moment-timezone";
 import { decisionEvent, leaveRequested, nonCriticalNotification } from "../services/notificationEvents";
+import { getAttendancePolicy } from "../services/attendanceProfiles";
 
 // ============================================================
 // LEAVE TYPE CONSTANTS
@@ -807,6 +809,60 @@ const leaveApprovalError = async (leave: any): Promise<string | null> => {
     return null;
 };
 
+const syncAttendanceForApprovedLeave = async (
+    connection: PoolConnection,
+    leave: RowDataPacket,
+): Promise<void> => {
+    const leaveType = String(leave.leaveType || leave.leaveSubject || "").trim().toUpperCase();
+    if (leaveType === "SHORT LEAVE" || leaveType === "HALF DAY") return;
+
+    const startDate = moment.tz(leave.fromDate, "Asia/Karachi").startOf("day");
+    const endDate = moment.tz(leave.toDate, "Asia/Karachi").startOf("day");
+    if (!startDate.isValid() || !endDate.isValid() || endDate.isBefore(startDate, "day")) {
+        throw new Error("Cannot sync attendance for an invalid leave date range.");
+    }
+    if (endDate.diff(startDate, "days") + 1 > 366) {
+        throw new Error("Leave date range cannot exceed 366 days.");
+    }
+
+    const userId = Number(leave.userId);
+    const policy = await getAttendancePolicy(userId);
+    const offDays = new Set(
+        String(policy?.offDay || "")
+            .split(",")
+            .map((day) => day.trim().slice(0, 3).toLowerCase())
+            .filter(Boolean),
+    );
+    const attendanceStatus = leaveType.toLowerCase().replace(/\b\w/g, (letter: string) => letter.toUpperCase());
+
+    for (const date = startDate.clone(); !date.isAfter(endDate, "day"); date.add(1, "day")) {
+        if (offDays.has(date.format("ddd").slice(0, 3).toLowerCase())) continue;
+
+        const dateValue = date.format("YYYY-MM-DD");
+        const [attendanceRows] = await connection.execute<RowDataPacket[]>(
+            `SELECT id FROM attendance
+             WHERE userId = ? AND date = ? AND status = 'Y'
+             ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+            [userId, dateValue],
+        );
+
+        if (attendanceRows.length > 0) {
+            await connection.execute(
+                `UPDATE attendance
+                 SET attendanceStatus = ?, clockIn = NULL, clockOut = NULL
+                 WHERE id = ?`,
+                [attendanceStatus, attendanceRows[0].id],
+            );
+        } else {
+            await connection.execute(
+                `INSERT INTO attendance (userId, date, attendanceStatus, status)
+                 VALUES (?, ?, ?, 'Y')`,
+                [userId, dateValue, attendanceStatus],
+            );
+        }
+    }
+};
+
 // UPDATE MY LEAVE (Employee) - New Route
 // ============================================================
 export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) => {
@@ -1012,6 +1068,8 @@ export const updateMyLeave = async (req: AuthenticatedRequest, res: Response) =>
 // UPDATE LEAVE STATUS (Approve/Reject) - FIXED
 // ============================================================
 export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response) => {
+    let connection: PoolConnection | null = null;
+    let transactionStarted = false;
     try {
         const { id } = req.params;
         const { leaveStatus, rejectedReason } = req.body;
@@ -1035,47 +1093,56 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
             });
         }
 
-        const [existingRows]: any[] = await pool.execute(
-            'SELECT * FROM leaves WHERE id = ? AND status = "Y"',
-            [id]
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+        transactionStarted = true;
+
+        const [existingRows] = await connection.execute<RowDataPacket[]>(
+            `SELECT * FROM leaves
+             WHERE id = ? AND status = 'Y' AND leaveStatus = 'Pending'
+             FOR UPDATE`,
+            [id],
         );
 
         if (existingRows.length === 0) {
+            await connection.rollback();
+            transactionStarted = false;
             return res.status(404).json({
                 success: false,
-                message: 'Leave not found'
+                message: 'Pending leave request not found',
             });
         }
 
-        // ✅ FIXED: Only update leaveStatus
-        if (leaveStatus === "Approved") {
-            const approvalError = await leaveApprovalError(existingRows[0]);
-            if (approvalError) return res.status(400).json({ success: false, message: approvalError });
-        }
         if (leaveStatus === "Rejected" && !String(rejectedReason || "").trim()) {
+            await connection.rollback();
+            transactionStarted = false;
             return res.status(400).json({ success: false, message: "Please provide a reason for rejection" });
         }
 
-        const [result]: any[] = await pool.execute(
+        await connection.execute(
             `UPDATE leaves SET leaveStatus = ? WHERE id = ?`,
-            [leaveStatus, id]
+            [leaveStatus, id],
         );
 
-        if (result.affectedRows === 0) {
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to update leave status'
-            });
+        if (leaveStatus === "Approved") {
+            await syncAttendanceForApprovedLeave(connection, existingRows[0]);
         }
 
-        const [updatedRows]: any[] = await pool.execute(
+        const [updatedRows] = await connection.execute<RowDataPacket[]>(
             'SELECT * FROM leaves WHERE id = ?',
-            [id]
+            [id],
         );
 
-        if (existingRows[0].leaveStatus !== leaveStatus && ["Approved", "Rejected"].includes(leaveStatus)) {
-            await nonCriticalNotification(() => decisionEvent("leave", Number(updatedRows[0].userId), Number(id), leaveStatus, rejectedReason));
-        }
+        await connection.commit();
+        transactionStarted = false;
+
+        await nonCriticalNotification(() => decisionEvent(
+            "leave",
+            Number(updatedRows[0].userId),
+            Number(id),
+            leaveStatus,
+            rejectedReason,
+        ));
 
         return res.status(200).json({
             success: true,
@@ -1084,11 +1151,20 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
         });
 
     } catch (error) {
+        if (connection && transactionStarted) {
+            try {
+                await connection.rollback();
+            } catch (rollbackError) {
+                console.error('Failed to rollback leave decision:', rollbackError);
+            }
+        }
         console.error('Error updating leave status:', error);
         return res.status(500).json({
             success: false,
             message: error instanceof Error ? error.message : 'Failed to update leave status'
         });
+    } finally {
+        connection?.release();
     }
 };
 

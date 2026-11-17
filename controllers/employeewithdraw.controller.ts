@@ -10,7 +10,6 @@ export const withdrawEmployee = async (
     const id = req.params.id;
     const { withdrawReason, lastWorkingDay } = req.body;
 
-    console.log("Withdraw Request Received:", { id, withdrawReason, lastWorkingDay });
 
     if (!withdrawReason) {
       res.status(400).json({ message: "Provide all required fields!" });
